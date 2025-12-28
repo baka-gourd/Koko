@@ -4,11 +4,14 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="Koko.Core/Koko.Core.csproj" Id="c23c8307-abb5-4497-b363-0423e26ee952" />
-  <Project Path="Koko/Koko.csproj">
-    <Platform Solution="*|ARM64" Project="ARM64" />
+  <Project Path="Koko.Core/Koko.Core.csproj" Id="c23c8307-abb5-4497-b363-0423e26ee952">
     <Platform Solution="*|x64" Project="x64" />
-    <Platform Solution="*|x86" Project="x86" />
+  </Project>
+  <Project Path="Koko.Demo/Koko.Demo.csproj" Id="a58b8a89-cecc-4da9-8666-3eb665bd1ab4">
+    <Platform Solution="*|x64" Project="x64" />
+  </Project>
+  <Project Path="Koko/Koko.csproj">
+    <Platform Solution="*|x64" Project="x64" />
     <Deploy />
   </Project>
 </Solution>

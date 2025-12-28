@@ -1,3 +1,5 @@
+using Windows.Win32;
+
 using Serilog;
 
 namespace Koko.Core
