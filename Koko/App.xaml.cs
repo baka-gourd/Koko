@@ -17,9 +17,12 @@ using Windows.ApplicationModel;
 using Windows.ApplicationModel.Activation;
 using Windows.Foundation;
 using Windows.Foundation.Collections;
+
 using Koko.Core;
-using Microsoft.Extensions.Hosting;
+
 using Serilog;
+
+using Path = System.IO.Path;
 
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
@@ -40,10 +43,12 @@ namespace Koko
         {
             InitializeComponent();
 
+            var startStamp = DateTimeOffset.Now.ToString("yyyyMMdd-HHmmss");
             Log.Logger = new LoggerConfiguration()
                 .MinimumLevel.Debug()
                 .Enrich.WithProperty("App", "Koko")
-                .WriteTo.File("logs\\koko-.log", rollingInterval: RollingInterval.Day)
+                .Enrich.WithProperty("AppStartTime", startStamp)
+                .WriteTo.File(Path.Combine("logs", $"koko-{startStamp}.log"), rollingInterval: RollingInterval.Infinite)
                 .CreateLogger();
 
             UnhandledException += (_, _) => Log.CloseAndFlush();
