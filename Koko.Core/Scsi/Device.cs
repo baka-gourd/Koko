@@ -18,7 +18,7 @@ public class Device
     public string? InstanceId { get; set; }
     public string? Manufacturer { get; set; }
     public string? Name { get; set; }
-    public string? PDOName { get; set; }
+    public string? PhysicalDeviceObjectName { get; set; }
     public bool Present { get; set; }
 
     internal Device(SetupDiDestroyDeviceInfoListSafeHandle info, SP_DEVINFO_DATA devinfoData)
@@ -35,7 +35,7 @@ public class Device
             SetupApi.GetDeviceProperty<string>(info, devinfoData, PInvoke.DEVPKEY_Device_EnumeratorName);
         Name =
             SetupApi.GetDeviceProperty<string>(info, devinfoData, PInvoke.DEVPKEY_Device_FriendlyName);
-        PDOName = SetupApi.GetDeviceRegistryProperty<string>(info, devinfoData,
+        PhysicalDeviceObjectName = SetupApi.GetDeviceRegistryProperty<string>(info, devinfoData,
             SETUP_DI_REGISTRY_PROPERTY.SPDRP_PHYSICAL_DEVICE_OBJECT_NAME);
         Present = SetupApi.GetDeviceProperty<bool>(info, devinfoData, PInvoke.DEVPKEY_Device_IsPresent);
         HardwareIds =
