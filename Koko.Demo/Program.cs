@@ -7,10 +7,12 @@ Log.Logger = new LoggerConfiguration()
     .Enrich.FromLogContext()
     .Enrich.WithProperty("App", "Koko")
     .Enrich.WithProperty("AppStartTime", startStamp)
-    .WriteTo.Console()
+    .WriteTo.Console(outputTemplate:
+        "[{Timestamp:HH:mm:ss.fff} {Level:u3}] {MethodFmt}{Message:lj}{NewLine}{Exception}")
     .CreateLogger();
 
-foreach (var device in SetupApi.ListDevices())
-{
+var device = SetupAPI.ListDevices("SCSI").First(x => x.ClassName.Equals("TapeDrive", StringComparison.InvariantCultureIgnoreCase));
 
-}
+using var drv = LtoTapeDrive.OpenDriveByPath($"\\\\.\\globalroot{device.PhysicalDeviceObjectName}");
+drv.GetInquiry();
+Console.ReadLine();
