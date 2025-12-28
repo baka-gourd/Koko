@@ -7,7 +7,7 @@ using Windows.Win32.System.Registry;
 
 namespace Koko.Core.Scsi;
 
-public static partial class SetupApi
+public static partial class SetupAPI
 {
     private static string DecodeRegSz(ReadOnlySpan<byte> data)
     {

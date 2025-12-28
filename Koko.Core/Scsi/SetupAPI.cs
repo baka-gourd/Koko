@@ -11,7 +11,7 @@ using Serilog;
 
 namespace Koko.Core.Scsi;
 
-public static partial class SetupApi
+public static partial class SetupAPI
 {
     public static IEnumerable<Device> ListDevices(string? enumerator = null)
     {

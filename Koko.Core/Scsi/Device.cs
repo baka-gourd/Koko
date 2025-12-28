@@ -23,25 +23,25 @@ public class Device
 
     internal Device(SetupDiDestroyDeviceInfoListSafeHandle info, SP_DEVINFO_DATA devinfoData)
     {
-        ClassGuid = SetupApi.GetDeviceProperty<Guid>(info, devinfoData, PInvoke.DEVPKEY_Device_ClassGuid);
-        ClassName = SetupApi.ClassNameFromGuidEx(ClassGuid);
-        ClassDescription = SetupApi.GetClassDescription(ClassGuid);
-        ContainerId = SetupApi.GetDeviceProperty<Guid>(info, devinfoData, PInvoke.DEVPKEY_Device_ContainerId);
+        ClassGuid = SetupAPI.GetDeviceProperty<Guid>(info, devinfoData, PInvoke.DEVPKEY_Device_ClassGuid);
+        ClassName = SetupAPI.ClassNameFromGuidEx(ClassGuid);
+        ClassDescription = SetupAPI.GetClassDescription(ClassGuid);
+        ContainerId = SetupAPI.GetDeviceProperty<Guid>(info, devinfoData, PInvoke.DEVPKEY_Device_ContainerId);
         CompatibleIds =
-            SetupApi.GetDeviceProperty<List<string>>(info, devinfoData, PInvoke.DEVPKEY_Device_CompatibleIds);
+            SetupAPI.GetDeviceProperty<List<string>>(info, devinfoData, PInvoke.DEVPKEY_Device_CompatibleIds);
         Description =
-            SetupApi.GetDeviceProperty<string>(info, devinfoData, PInvoke.DEVPKEY_Device_FriendlyName);
+            SetupAPI.GetDeviceProperty<string>(info, devinfoData, PInvoke.DEVPKEY_Device_FriendlyName);
         Enumerator =
-            SetupApi.GetDeviceProperty<string>(info, devinfoData, PInvoke.DEVPKEY_Device_EnumeratorName);
+            SetupAPI.GetDeviceProperty<string>(info, devinfoData, PInvoke.DEVPKEY_Device_EnumeratorName);
         Name =
-            SetupApi.GetDeviceProperty<string>(info, devinfoData, PInvoke.DEVPKEY_Device_FriendlyName);
-        PhysicalDeviceObjectName = SetupApi.GetDeviceRegistryProperty<string>(info, devinfoData,
+            SetupAPI.GetDeviceProperty<string>(info, devinfoData, PInvoke.DEVPKEY_Device_FriendlyName);
+        PhysicalDeviceObjectName = SetupAPI.GetDeviceRegistryProperty<string>(info, devinfoData,
             SETUP_DI_REGISTRY_PROPERTY.SPDRP_PHYSICAL_DEVICE_OBJECT_NAME);
-        Present = SetupApi.GetDeviceProperty<bool>(info, devinfoData, PInvoke.DEVPKEY_Device_IsPresent);
+        Present = SetupAPI.GetDeviceProperty<bool>(info, devinfoData, PInvoke.DEVPKEY_Device_IsPresent);
         HardwareIds =
-            SetupApi.GetDeviceProperty<List<string>>(info, devinfoData, PInvoke.DEVPKEY_Device_HardwareIds);
+            SetupAPI.GetDeviceProperty<List<string>>(info, devinfoData, PInvoke.DEVPKEY_Device_HardwareIds);
         Manufacturer =
-            SetupApi.GetDeviceProperty<string>(info, devinfoData, PInvoke.DEVPKEY_Device_Manufacturer);
-        InstanceId = SetupApi.GetDeviceInstanceId(info, devinfoData);
+            SetupAPI.GetDeviceProperty<string>(info, devinfoData, PInvoke.DEVPKEY_Device_Manufacturer);
+        InstanceId = SetupAPI.GetDeviceInstanceId(info, devinfoData);
     }
 }
