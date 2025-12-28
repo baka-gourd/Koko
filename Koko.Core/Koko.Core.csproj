@@ -7,6 +7,7 @@
     <CsWin32UseSafeHandles>true</CsWin32UseSafeHandles>
     <PlatformTarget>x64</PlatformTarget>
     <Platforms>x64</Platforms>
+    <LangVersion>14</LangVersion>
   </PropertyGroup>
 
   <ItemGroup>

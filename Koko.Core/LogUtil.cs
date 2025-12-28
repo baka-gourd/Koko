@@ -1,6 +1,9 @@
+using System.Runtime.CompilerServices;
+
 using Windows.Win32;
 
 using Serilog;
+using Serilog.Context;
 
 namespace Koko.Core
 {
@@ -15,6 +18,18 @@ namespace Koko.Core
             catch
             {
                 // ignored
+            }
+        }
+
+        extension(Log)
+        {
+            public static IDisposable PushMethod(
+                [CallerMemberName] string method = "")
+            {
+                if (string.IsNullOrEmpty(method))
+                    return LogContext.PushProperty("MethodFmt", "");
+
+                return LogContext.PushProperty("MethodFmt", $"<{method}> ");
             }
         }
     }
