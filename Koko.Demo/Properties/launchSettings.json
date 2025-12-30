@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "Koko.Demo": {
+      "commandName": "Project",
+      "remoteDebugEnabled": false,
+      "remoteDebugMachine": "NPTR-TAPE:4026",
+      "authenticationMode": "Windows",
+      "nativeDebugging": false
+    }
+  }
+}
