@@ -4,7 +4,9 @@
       "commandName": "MsixPackage"
     },
     "Koko (Unpackaged)": {
-      "commandName": "Project"
+      "commandName": "Project",
+      "remoteDebugEnabled": false,
+      "remoteDebugMachine": "NPTR-TAPE:4026"
     }
   }
 }

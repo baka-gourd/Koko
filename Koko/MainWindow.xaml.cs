@@ -1,21 +1,9 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Runtime.InteropServices.WindowsRuntime;
+using Koko.Core;
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
-using Microsoft.UI.Xaml.Data;
-using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Navigation;
 
-using Windows.Foundation;
-using Windows.Foundation.Collections;
-
-using Koko.Core;
+using Serilog;
 
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
@@ -31,39 +19,32 @@ namespace Koko
         {
             InitializeComponent();
             Closed += (_, _) => LogUtil.CloseAndFlush();
-
             ExtendsContentIntoTitleBar = true;
             SetTitleBar(TitleBar);
         }
 
-        private int _tabCounter = 1;
-        private void MainTabView_AddTabButtonClick(TabView sender, object args)
+        private void TabFrame_DataContextChanged(FrameworkElement sender, DataContextChangedEventArgs args)
         {
-            var tab = new TabViewItem
+            if (sender is not Frame frame) return;
+            if (args.NewValue is not TabItemViewModel tab) return;
+
+            if (tab.PageType is null) return;
+
+            // 避免重复导航
+            if (frame.CurrentSourcePageType == tab.PageType) return;
+
+            var ok = frame.Navigate(tab.PageType, tab.Parameter);
+
+            Log.Debug("Navigate {Page} => {Ok}", tab.PageType, ok);
+        }
+
+        private void TabView_OnTabCloseRequested(TabView sender, TabViewTabCloseRequestedEventArgs args)
+        {
+            if (sender.DataContext is MainWindowViewModel vm &&
+                args.Item is TabItemViewModel tab)
             {
-                Header = $"Tab {_tabCounter++}",
-                IsClosable = true,
-                Content = new Grid
-                {
-                    Padding = new Thickness(12),
-                    Children =
-                    {
-                        new TextBlock { Text = "New tab content" }
-                    }
-                }
-            };
-
-            sender.TabItems.Add(tab);
-            sender.SelectedItem = tab;
-        }
-
-        private void MainTabView_TabCloseRequested(TabView sender, TabViewTabCloseRequestedEventArgs args)
-        {
-            sender.TabItems.Remove(args.Item);
-        }
-
-        private void MainTabView_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
+                vm.CloseTabCommand.Execute(tab);
+            }
         }
     }
 }

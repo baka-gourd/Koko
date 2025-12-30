@@ -1,8 +1,4 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Runtime.InteropServices.WindowsRuntime;
+using Koko.Core;
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -13,14 +9,19 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
 using Microsoft.UI.Xaml.Shapes;
 
+using Serilog;
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices.WindowsRuntime;
+using System.Threading.Tasks;
+
 using Windows.ApplicationModel;
 using Windows.ApplicationModel.Activation;
 using Windows.Foundation;
 using Windows.Foundation.Collections;
-
-using Koko.Core;
-
-using Serilog;
 
 using Path = System.IO.Path;
 
@@ -51,7 +52,22 @@ namespace Koko
                 .WriteTo.File(Path.Combine("logs", $"koko-{startStamp}.log"), rollingInterval: RollingInterval.Infinite)
                 .CreateLogger();
 
-            UnhandledException += (_, _) => Log.CloseAndFlush();
+            UnhandledException += (_, e) =>
+            {
+                Log.Error(e.Exception, "UI UnhandledException");
+                Log.CloseAndFlush();
+            };
+
+            AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            {
+                Log.Error(e.ExceptionObject as Exception, "AppDomain UnhandledException");
+            };
+
+            TaskScheduler.UnobservedTaskException += (_, e) =>
+            {
+                Log.Error(e.Exception, "UnobservedTaskException");
+                e.SetObserved();
+            };
         }
 
         /// <summary>

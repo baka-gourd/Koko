@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="Koko.DrivePages.LTODrive.LTOCommandPalette"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Koko.DrivePages.LTODrive"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:dev="using:DevWinUI"
+    xmlns:core="using:Koko.Core.Scsi"
+    xmlns:helpers="using:Koko.Helpers"
+    mc:Ignorable="d">
+
+    <Grid Padding="8" RowSpacing="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Row 0 -->
+        <Grid Grid.Row="0" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <!-- Command label -->
+                <ColumnDefinition Width="*"/>
+                <!-- Command -->
+                <ColumnDefinition Width="Auto"/>
+                <!-- Timeout -->
+            </Grid.ColumnDefinitions>
+
+            <TextBlock
+                Grid.Column="0"
+                Text="Command:"
+                VerticalAlignment="Center"/>
+
+            <TextBox
+                Grid.Column="1"
+                FontFamily="Consolas"
+                dev:TextBoxExtensions.CustomMask="h:[0-9a-fA-F]"
+                dev:TextBoxExtensions.Mask="hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh"
+                Text="{Binding ScsiCommandDisplay, Mode=TwoWay}"/>
+
+            <NumberBox
+                Grid.Column="2"
+                PlaceholderText="Timeout"
+                Width="96"
+                Value="{Binding Timeout, Mode=TwoWay}"/>
+        </Grid>
+
+        <!-- Row 1 -->
+        <Grid Grid.Row="1" ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <!-- DataDirection label -->
+                <ColumnDefinition Width="Auto"/>
+                <!-- ComboBox -->
+                <ColumnDefinition Width="Auto"/>
+                <!-- Data label -->
+                <ColumnDefinition Width="*"/>
+                <!-- Data TextBox -->
+                <ColumnDefinition Width="Auto"/>
+                <!-- Send -->
+            </Grid.ColumnDefinitions>
+
+            <!-- DataDirection -->
+            <TextBlock
+                Grid.Column="0"
+                Text="DataDirection:"
+                VerticalAlignment="Center"/>
+
+            <ComboBox
+                Grid.Column="1"
+                Width="128"
+                ItemsSource="{dev:EnumValues Type=core:DataDirection}"
+                SelectedItem="{Binding Direction}"/>
+
+            <!-- Data -->
+            <TextBlock
+                Grid.Column="2"
+                Text="Data:"
+                VerticalAlignment="Center"/>
+
+            <TextBox
+                Grid.Column="3"
+                PlaceholderText="Data"
+                FontFamily="Consolas"
+                Text="{Binding ScsiDataDisplay, Mode=TwoWay}"/>
+
+            <!-- Send -->
+            <Button
+                Command="{Binding SendScsiCommand}"
+                Grid.Column="4"
+                x:Uid="LTOCP_Send"
+                Width="96"/>
+        </Grid>
+
+        <TextBox
+            AcceptsReturn="True"
+            FontFamily="Consolas"
+            x:Name="InfoBox"
+            IsReadOnly="True"
+            ContextFlyout="{x:Null}"
+            Text="{Binding InfoText, Mode=OneWay}"
+            Grid.Row="2"
+            HorizontalAlignment="Stretch"
+            VerticalAlignment="Stretch"
+            Margin="0" />
+        <Grid Grid.Row="3">
+            <dev:SelectorBarSegmented>
+                <SelectorBarItem x:Uid="LTOCP_ToolBar_Command">
+                    <SelectorBarItem.Icon>
+                        <FontIcon Glyph="&#xEB3B;" />
+                    </SelectorBarItem.Icon>
+                </SelectorBarItem>
+                <SelectorBarItem x:Uid="LTOCP_ToolBar_Buffer" >
+                    <SelectorBarItem.Icon>
+                        <FontIcon Glyph="&#xF000;" />
+                    </SelectorBarItem.Icon>
+                </SelectorBarItem>
+                <SelectorBarItem x:Uid="LTOCP_ToolBar_MAM" >
+                    <SelectorBarItem.Icon>
+                        <FontIcon Glyph="&#xE8D2;" />
+                    </SelectorBarItem.Icon>
+                </SelectorBarItem>
+                <SelectorBarItem x:Uid="LTOCP_ToolBar_Log" >
+                    <SelectorBarItem.Icon>
+                        <FontIcon Glyph="&#xE8A5;" />
+                    </SelectorBarItem.Icon>
+                </SelectorBarItem>
+                <SelectorBarItem x:Uid="LTOCP_ToolBar_Test" >
+                    <SelectorBarItem.Icon>
+                        <FontIcon Glyph="&#xEC7A;" />
+                    </SelectorBarItem.Icon>
+                </SelectorBarItem>
+            </dev:SelectorBarSegmented>
+        </Grid>
+    </Grid>
+</Page>
