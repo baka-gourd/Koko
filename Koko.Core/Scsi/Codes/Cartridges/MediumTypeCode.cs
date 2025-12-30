@@ -1,4 +1,4 @@
-namespace Koko.Core.Scsi.Codes;
+namespace Koko.Core.Scsi.Codes.Cartridges;
 
 public enum MediumTypeCode : byte
 {
