@@ -18,4 +18,11 @@ public interface IScsiDrive
         out byte scsiStatus,
         out uint bytesReturned,
         Span<byte> senseBuffer);
+
+    public bool ScsiCommand(ReadOnlySpan<byte> commandBlock,
+        DataDirection dataDirection,
+        uint timeout,
+        out byte scsiStatus,
+        out uint bytesReturned,
+        Span<byte> senseBuffer);
 }

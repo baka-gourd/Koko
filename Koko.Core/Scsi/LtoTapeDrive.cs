@@ -11,18 +11,11 @@ using Serilog;
 
 namespace Koko.Core.Scsi;
 
-public class LtoTapeDrive : IScsiDrive, IDisposable
+public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
 {
-    private SafeFileHandle _driveHandle;
-
     public string Vendor { get; private set; } = "";
     public string Product { get; private set; } = "";
-    public string Revision { get; private set; } = "";
-
-    public LtoTapeDrive(SafeFileHandle handle)
-    {
-        _driveHandle = handle;
-    }
+    public string SerialNumber { get; private set; } = "";
 
     public static LtoTapeDrive OpenDriveByPath(string path)
     {
@@ -42,8 +35,8 @@ public class LtoTapeDrive : IScsiDrive, IDisposable
         }
     }
 
-    public int BlockSizeLimit { get; set; } = 512_000;
-    public bool ScsiRead(
+    public override int BlockSizeLimit { get; set; } = 512_000;
+    public override bool ScsiRead(
         ReadOnlySpan<byte> commandBlock,
         Span<byte> returnBuffer,
         uint timeoutSeconds,
@@ -52,17 +45,35 @@ public class LtoTapeDrive : IScsiDrive, IDisposable
         Span<byte> senseBuffer)
     {
         return IOControl.IOCtlDirect(
-            _driveHandle,
+            handle,
             commandBlock,
             returnBuffer,
-            IOControl.ScsiIoctlDataIn,
+            DataDirection.In,
             senseBuffer,
             timeoutSeconds,
             out scsiStatus,
             out bytesReturned);
     }
 
-    public bool ScsiWrite(
+    public override bool ScsiCommand(ReadOnlySpan<byte> commandBlock,
+        DataDirection dataDirection,
+        uint timeout,
+        out byte scsiStatus,
+        out uint bytesReturned,
+        Span<byte> senseBuffer)
+    {
+        return IOControl.IOCtlDirect(
+            handle,
+            commandBlock,
+            [],
+            dataDirection,
+            senseBuffer,
+            timeout,
+            out scsiStatus,
+            out bytesReturned);
+    }
+
+    public override bool ScsiWrite(
         ReadOnlySpan<byte> commandBlock,
         Span<byte> dataBuffer,
         uint timeoutSeconds,
@@ -71,10 +82,10 @@ public class LtoTapeDrive : IScsiDrive, IDisposable
         Span<byte> senseBuffer)
     {
         return IOControl.IOCtlDirect(
-            _driveHandle,
+            handle,
             commandBlock,
             dataBuffer,
-            IOControl.ScsiIoctlDataOut,
+            DataDirection.Out,
             senseBuffer,
             timeoutSeconds,
             out scsiStatus,
@@ -85,13 +96,13 @@ public class LtoTapeDrive : IScsiDrive, IDisposable
     {
         using (Log.PushMethod())
         {
-            Span<byte> sense = stackalloc byte[64];
+            Span<byte> sense = stackalloc byte[IOControl.DefaultSenseLength];
 
             // 1) VPD page 0x80 header: 4 bytes
             // INQUIRY(6): [0]=0x12, [1]=EVPD(1)/CmdDt(0), [2]=PageCode, [3]=Reserved, [4]=AllocLen, [5]=Control
             Span<byte> vpdHdr = stackalloc byte[4];
             if (!TryScsiRead(
-                    commandBlock: stackalloc byte[] { 0x12, 0x01, 0x80, 0x00, 0x04, 0x00 },
+                    commandBlock: [0x12, 0x01, 0x80, 0x00, 0x04, 0x00],
                     returnBuffer: vpdHdr,
                     timeoutSeconds: timeoutSeconds,
                     senseBuffer: sense,
@@ -119,7 +130,7 @@ public class LtoTapeDrive : IScsiDrive, IDisposable
 
             try
             {
-                var vpdSlice = vpdPage.Slice(0, totalLen);
+                var vpdSlice = vpdPage[..totalLen];
 
                 if (!TryScsiRead(
                         commandBlock: [0x12, 0x01, 0x80, 0x00, (byte)(totalLen & 0xFF), 0x00],
@@ -142,7 +153,7 @@ public class LtoTapeDrive : IScsiDrive, IDisposable
                     return false;
 
                 int revisionLen = Math.Min(pageLen, available - 4);
-                Revision = Encoding.ASCII.GetString(vpdSlice.Slice(4, revisionLen)).Trim();
+                SerialNumber = Encoding.ASCII.GetString(vpdSlice.Slice(4, revisionLen)).Trim();
 
                 // 3) 标准 INQUIRY（EVPD=0），读 0x60
                 Span<byte> std = stackalloc byte[0x60];
@@ -160,14 +171,12 @@ public class LtoTapeDrive : IScsiDrive, IDisposable
                 }
 
                 // 标准 INQUIRY：Vendor(8) offset=8；Product(16) offset=16
-                // 为安全起见，对 bytesReturned 做下限检查
                 if (bytesReturned < 32) // 至少覆盖到 Product 字段末尾(16+16)
                     return false;
 
                 Vendor = Encoding.ASCII.GetString(std.Slice(8, 8)).Trim();
                 Product = Encoding.ASCII.GetString(std.Slice(16, 16)).Trim();
-                Log.Debug("Drive Vendor={Vendor}", Vendor);
-                Log.Debug("Drive Product={Product}", Product);
+                Log.Debug("Drive Vendor={Vendor},Product={Product},Revision={Revision}", Vendor, Product, SerialNumber);
                 return true;
             }
             finally
@@ -178,7 +187,7 @@ public class LtoTapeDrive : IScsiDrive, IDisposable
         }
     }
 
-    private bool TryScsiRead(
+    public bool TryScsiRead(
         ReadOnlySpan<byte> commandBlock,
         Span<byte> returnBuffer,
         uint timeoutSeconds,
@@ -195,8 +204,8 @@ public class LtoTapeDrive : IScsiDrive, IDisposable
             senseBuffer: senseBuffer);
     }
 
-    public void Dispose()
+    protected override void DisposeCore()
     {
-        _driveHandle.Dispose();
+        handle.Dispose();
     }
 }

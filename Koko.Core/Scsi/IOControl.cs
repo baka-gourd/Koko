@@ -10,17 +10,20 @@ using Windows.Win32.Storage.IscsiDisc;
 
 namespace Koko.Core.Scsi;
 
-internal class IOControl
+public enum DataDirection : byte
+{
+    In = 1,
+    Out = 0,
+    Unspecified = 2
+}
+
+public class IOControl
 {
     private const uint IoctlScsiPassThrough = 0x4D004;
     private const uint IoctlScsiPassThroughDirect = 0x4D014;
 
-    private const int DefaultSenseLength = 64;
+    public const int DefaultSenseLength = 64;
     private const int DefaultCommandBlockLength = 16;
-
-    internal const byte ScsiIoctlDataIn = 1;
-    internal const byte ScsiIoctlDataOut = 0;
-    internal const byte ScsiIoctlDataUnspecified = 2;
 
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     private unsafe struct SptdWithSense64
@@ -34,7 +37,7 @@ internal class IOControl
         SafeFileHandle deviceHandle,
         ReadOnlySpan<byte> commandBlock,
         Span<byte> dataBuffer,
-        byte dataDirection,
+        DataDirection dataDirection,
         Span<byte> senseBuffer,
         uint timeoutSeconds,
         out byte scsiStatus,
@@ -54,16 +57,16 @@ internal class IOControl
             if (commandBlock.Length > DefaultCommandBlockLength)
                 throw new ArgumentOutOfRangeException(nameof(commandBlock), "CDB length must be <= 16.");
 
-            if (dataDirection != ScsiIoctlDataOut &&
-                dataDirection != ScsiIoctlDataIn &&
-                dataDirection != ScsiIoctlDataUnspecified)
+            if (dataDirection != DataDirection.Out &&
+                dataDirection != DataDirection.In &&
+                dataDirection != DataDirection.Unspecified)
                 throw new ArgumentOutOfRangeException(nameof(dataDirection), "Invalid SCSI data direction.");
 
             SptdWithSense64 packet = default;
             packet.Sptd.Length = (ushort)sizeof(SCSI_PASS_THROUGH_DIRECT);
             packet.Sptd.CdbLength = (byte)commandBlock.Length;
             packet.Sptd.SenseInfoLength = DefaultSenseLength;
-            packet.Sptd.DataIn = dataDirection;
+            packet.Sptd.DataIn = (byte)dataDirection;
             packet.Sptd.DataTransferLength = (uint)dataBuffer.Length;
             packet.Sptd.TimeOutValue = timeoutSeconds;
             packet.Sptd.SenseInfoOffset =

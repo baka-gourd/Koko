@@ -1,5 +1,4 @@
 CreateFile
-FILE_ACCESS_FLAGS
 GENERIC_ACCESS_RIGHTS
 
 DeviceIoControl
