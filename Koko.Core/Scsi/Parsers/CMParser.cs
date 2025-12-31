@@ -11,7 +11,11 @@ public sealed class CMParser
 {
     private const uint GuardWrapIdentifier = 0xFFFFFFFE;
     private const uint UnusedWrapIdentifier = 0xFFFFFFFF;
-    private byte[] _buffer;
+    private readonly ReadOnlyMemory<byte> _cm;
+    private CMParser(ReadOnlyMemory<byte> cm)
+    {
+        _cm = cm;
+    }
 
     // Raw cartridge type as read from CM page 1 (offset 22). Needed to rebuild immutable TapeCartridgeProfile.
     private ushort _cartridgeType;
@@ -38,11 +42,6 @@ public sealed class CMParser
     private int _hdrLen;               // a_HdrLength
 
     private readonly Dictionary<int, Page> _pageById = new();
-
-    private CMParser(ReadOnlySpan<byte> buffer)
-    {
-        _buffer = buffer.ToArray();
-    }
 
     public static CMParser CreateFromSpan(ReadOnlySpan<byte> buffer)
     {
@@ -77,9 +76,10 @@ public sealed class CMParser
                 nameof(buffer));
 
         // Only keep the exact CM region; callers may have provided extra bytes.
-        var cmSpan = buffer[..minCMSizeBytes];
+        var owned = GC.AllocateUninitializedArray<byte>(minCMSizeBytes);
+        buffer[..minCMSizeBytes].CopyTo(owned);
 
-        var parser = new CMParser(cmSpan);
+        var parser = new CMParser(owned);
 
         parser.ParseCM();
 
@@ -111,6 +111,7 @@ public sealed class CMParser
 
     private void ParsePageTables(Action<string> warn)
     {
+        var cm = _cm.Span;
         // VB:
         // a_Offset = 36 start of protected table
         // read 4-byte entries until page id == 0xFFF -> EOPT
@@ -119,9 +120,9 @@ public sealed class CMParser
         var offset = 36;
         var unprot = false;
 
-        while (offset < 400 && offset + 4 <= _buffer.Length)
+        while (offset < 400 && offset + 4 <= cm.Length)
         {
-            var tableWord0 = ReadUInt16BigEndian(_buffer, offset);
+            var tableWord0 = ReadUInt16BigEndian(cm, offset);
             var pageId = tableWord0 & 0x0FFF;
 
             if (pageId == 0x0FFF)
@@ -129,7 +130,7 @@ public sealed class CMParser
                 if (!unprot)
                 {
                     unprot = true;
-                    int unprotOffset = ReadUInt16BigEndian(_buffer, offset + 2);
+                    int unprotOffset = ReadUInt16BigEndian(cm, offset + 2);
                     offset = unprotOffset;
                     continue;
                 }
@@ -145,13 +146,13 @@ public sealed class CMParser
             }
 
             // Real page entry: version (high nibble of byte at offset), page offset at offset+2
-            var version = (_buffer[offset] >> 4) & 0x0F;
-            int pageOffset = ReadUInt16BigEndian(_buffer, offset + 2);
+            var version = (cm[offset] >> 4) & 0x0F;
+            int pageOffset = ReadUInt16BigEndian(cm, offset + 2);
 
             // Read page header length word: in VB .Length = g_GetWord(a_CMBuffer, .Offset + 2)
             var pageLength = -1;
-            if (pageOffset >= 0 && pageOffset + 4 <= _buffer.Length)
-                pageLength = ReadUInt16BigEndian(_buffer, pageOffset + 2);
+            if (pageOffset + 4 <= cm.Length)
+                pageLength = ReadUInt16BigEndian(cm, pageOffset + 2);
 
             var p = new Page(
                 Key: pageId,
@@ -162,9 +163,9 @@ public sealed class CMParser
             );
 
             // Header cross-check (VB warns if header doesn't match page-table entry)
-            if (pageOffset >= 0 && pageOffset + 2 <= _buffer.Length)
+            if (pageOffset + 2 <= cm.Length)
             {
-                var headerWord0 = ReadUInt16BigEndian(_buffer, pageOffset);
+                var headerWord0 = ReadUInt16BigEndian(cm, pageOffset);
                 if (headerWord0 != tableWord0)
                     warn($"CM Page Header Error: Offset={pageOffset} expected=0x{tableWord0:X4} actual=0x{headerWord0:X4}");
             }
@@ -182,9 +183,18 @@ public sealed class CMParser
     private bool TrySlicePage(Page page, out ReadOnlySpan<byte> span)
     {
         span = default;
-        if (page.Offset < 0 || page.Length < 0) return false;
-        if (page.Offset + page.Length > _buffer.Length) return false;
-        span = new ReadOnlySpan<byte>(_buffer, page.Offset, page.Length);
+
+        if (page.Offset < 0 || page.Length < 0)
+            return false;
+
+        var cm = _cm.Span;
+
+        if ((uint)page.Offset > (uint)cm.Length)
+            return false;
+        if ((uint)page.Length > (uint)(cm.Length - page.Offset))
+            return false;
+
+        span = cm.Slice(page.Offset, page.Length);
         return true;
     }
 
@@ -212,7 +222,7 @@ public sealed class CMParser
 
         var pageRevision = page.Length > 0 ? page[0] : (byte)0;
         var particles = page.Length > 42 ? page[42] : (byte)0;
-        var particleType = ParticleType.Unknown;
+        ParticleType particleType;
         var substrateType = SubstrateType.Unknown;
         // Particle/Substrate logic matches VB
         if (pageRevision >= 0x40)
@@ -355,6 +365,7 @@ public sealed class CMParser
 
     private void ParseUsagePagesIfPresent(Action<string> warn)
     {
+        var cm = _cm.Span;
         UsageData.Clear();
 
         if (TapeCartridgeProfile is null)
@@ -363,9 +374,9 @@ public sealed class CMParser
         // Need cartridge format to decide offsets (LTO5+ changes)
         var isLTO5Plus = TapeCartridgeProfile.IsLaterThan(LTODensityCode.L5);
 
-        var atOffset = isLTO5Plus
-            ? new[] { 32, 36, 44, 52, 56, 60, 62, 64, 66, 80 }
-            : new[] { 24, 28, 36, 44, 48, 52, 54, 56, 58 };
+        ReadOnlySpan<int> atOffset = isLTO5Plus
+            ? [32, 36, 44, 52, 56, 60, 62, 64, 66, 80]
+            : [24, 28, 36, 44, 48, 52, 54, 56, 58];
 
         var driveSnLength = isLTO5Plus ? 16 : 10;
 
@@ -379,12 +390,12 @@ public sealed class CMParser
         if (TryGetPage(0x106, out var p106) && p106.Offset >= 0 && p106.Length >= 0)
         {
             var off = p106.Offset + 4;
-            if (off + 8 <= _buffer.Length)
-                mechVendorId = Encoding.ASCII.GetString(_buffer, off, 8).TrimEnd();
+            if (off + 8 <= _cm.Length)
+                mechVendorId = Encoding.ASCII.GetString(cm.Slice(off, 8)).TrimEnd();
         }
 
         // Read 4 usage pages (0..3), each appended with sub-page from 0x106 (12 + 64*i)
-        var rawPages = new List<(int idx, byte[] data, int threadCount)>(capacity: 4);
+        var rawPages = new List<UsageSnapshot>(capacity: 4);
 
         for (var i = 0; i < 4; i++)
         {
@@ -396,64 +407,69 @@ public sealed class CMParser
             if (up.Offset < 0 || up.Length < 0 || mp.Offset < 0 || mp.Length < 0)
                 continue;
 
-            // Slice usage page
-            if (up.Offset + usagePageLen > _buffer.Length)
+            if ((uint)up.Offset > (uint)cm.Length || (uint)usagePageLen > (uint)(cm.Length - up.Offset))
                 continue;
 
-            var a = new byte[usagePageLen];
-            Array.Copy(_buffer, up.Offset, a, 0, usagePageLen);
-
-            // Append mech related sub-page (always 64 bytes)
+            // mech sub-page (always 64 bytes)
             var mechSubOff = mp.Offset + 12 + 64 * i;
-            if (mechSubOff + 64 > _buffer.Length)
+            if ((uint)mechSubOff > (uint)cm.Length || 64u > (uint)(cm.Length - mechSubOff))
                 continue;
 
-            var b = new byte[64];
-            Array.Copy(_buffer, mechSubOff, b, 0, 64);
+            var usageSpan = cm.Slice(up.Offset, usagePageLen);
 
-            var combined = a.Concat(b).ToArray();
+            var threadCount = ReadI32Be(usageSpan, atOffset[0]);
 
-            var threadCount = ReadI32Be(combined, atOffset[0]);
-            rawPages.Add((i, combined, threadCount));
+            rawPages.Add(new UsageSnapshot(
+                Index: i,
+                UsageOffset: up.Offset,
+                UsageLength: usagePageLen,
+                MechOffset: mechSubOff,
+                ThreadCount: threadCount));
         }
 
         if (rawPages.Count < 4)
             return;
 
         // Reverse sort by thread count (VB: b.data1.CompareTo(a.data1))
-        rawPages.Sort((x, y) => y.threadCount.CompareTo(x.threadCount));
+        rawPages.Sort(static (x, y) => y.ThreadCount.CompareTo(x.ThreadCount));
 
         // VB reindexes after sort
         // We will interpret raw_pages[0..3] as current..previous
         // and fill UsageData[0..2] with deltas vs [i+1]
         for (var i = 0; i < 3; i++)
         {
-            var cur = rawPages[i].data;
-            var prev = rawPages[i + 1].data;
+            var curSnap = rawPages[i];
+            var prevSnap = rawPages[i + 1];
+
+            var curUsage = cm.Slice(curSnap.UsageOffset, curSnap.UsageLength);
+            var prevUsage = cm.Slice(prevSnap.UsageOffset, prevSnap.UsageLength);
+
+            var curMech = cm.Slice(curSnap.MechOffset, 64);
+            var prevMech = cm.Slice(prevSnap.MechOffset, 64);
 
             // `Usage` is a positional record (init-only / immutable intent). Build from locals and publish once.
-            int pageId = ReadUInt16BigEndian(cur, 0);
-            var driveSn = ParseDriveSn(cur, 12, driveSnLength);
+            int pageId = ReadUInt16BigEndian(curUsage, 0);
+            var driveSn = ParseDriveSn(curUsage, 12, driveSnLength);
 
-            var threadCount = ReadI32Be(cur, atOffset[0]);
-            var setsWritten = ReadUInt64BigEndian(cur, atOffset[1]) - ReadUInt64BigEndian(prev, atOffset[1]);
-            var setsRead = ReadUInt64BigEndian(cur, atOffset[2]) - ReadUInt64BigEndian(prev, atOffset[2]);
-            var totalSets = ReadUInt64BigEndian(cur, atOffset[1]) + ReadUInt64BigEndian(cur, atOffset[2]);
-            var writeRetries = ReadI32Be(cur, atOffset[3]) - ReadI32Be(prev, atOffset[3]);
-            var readRetries = ReadI32Be(cur, atOffset[4]) - ReadI32Be(prev, atOffset[4]);
-            var unRecovWrites = ReadUInt16BigEndian(cur, atOffset[5]) - ReadUInt16BigEndian(prev, atOffset[5]);
-            var unRecovReads = ReadUInt16BigEndian(cur, atOffset[6]) - ReadUInt16BigEndian(prev, atOffset[6]);
-            var suspendedWrites = ReadUInt16BigEndian(cur, atOffset[7]) - ReadUInt16BigEndian(prev, atOffset[7]);
-            var fatalSusWrites = ReadUInt16BigEndian(cur, atOffset[8]) - ReadUInt16BigEndian(prev, atOffset[8]);
+            var threadCount = ReadI32Be(curUsage, atOffset[0]);
+            var setsWritten = ReadUInt64BigEndian(curUsage, atOffset[1]) - ReadUInt64BigEndian(prevUsage, atOffset[1]);
+            var setsRead = ReadUInt64BigEndian(curUsage, atOffset[2]) - ReadUInt64BigEndian(prevUsage, atOffset[2]);
+            var totalSets = ReadUInt64BigEndian(curUsage, atOffset[1]) + ReadUInt64BigEndian(curUsage, atOffset[2]);
+            var writeRetries = ReadI32Be(curUsage, atOffset[3]) - ReadI32Be(prevUsage, atOffset[3]);
+            var readRetries = ReadI32Be(curUsage, atOffset[4]) - ReadI32Be(prevUsage, atOffset[4]);
+            var unRecovWrites = ReadUInt16BigEndian(curUsage, atOffset[5]) - ReadUInt16BigEndian(prevUsage, atOffset[5]);
+            var unRecovReads = ReadUInt16BigEndian(curUsage, atOffset[6]) - ReadUInt16BigEndian(prevUsage, atOffset[6]);
+            var suspendedWrites = ReadUInt16BigEndian(curUsage, atOffset[7]) - ReadUInt16BigEndian(prevUsage, atOffset[7]);
+            var fatalSusWrites = ReadUInt16BigEndian(curUsage, atOffset[8]) - ReadUInt16BigEndian(prevUsage, atOffset[8]);
 
-            var lifeSetsWritten = ReadUInt64BigEndian(cur, atOffset[1]);
-            var lifeSetsRead = ReadUInt64BigEndian(cur, atOffset[2]);
-            var lifeWriteRetries = ReadI32Be(cur, atOffset[3]);
-            var lifeReadRetries = ReadI32Be(cur, atOffset[4]);
-            int lifeUnRecoverWrites = ReadUInt16BigEndian(cur, atOffset[5]);
-            int lifeUnRecoverReads = ReadUInt16BigEndian(cur, atOffset[6]);
-            int lifeSuspendedWrites = ReadUInt16BigEndian(cur, atOffset[7]);
-            int lifeFatalSuspendWrites = ReadUInt16BigEndian(cur, atOffset[8]);
+            var lifeSetsWritten = ReadUInt64BigEndian(curUsage, atOffset[1]);
+            var lifeSetsRead = ReadUInt64BigEndian(curUsage, atOffset[2]);
+            var lifeWriteRetries = ReadI32Be(curUsage, atOffset[3]);
+            var lifeReadRetries = ReadI32Be(curUsage, atOffset[4]);
+            int lifeUnRecoverWrites = ReadUInt16BigEndian(curUsage, atOffset[5]);
+            int lifeUnRecoverReads = ReadUInt16BigEndian(curUsage, atOffset[6]);
+            int lifeSuspendedWrites = ReadUInt16BigEndian(curUsage, atOffset[7]);
+            int lifeFatalSuspendWrites = ReadUInt16BigEndian(curUsage, atOffset[8]);
             var lifeTapeMetresPulled = 0;
 
             // LTO5+ extended fields: only if cur[76] > 0 per VB
@@ -465,20 +481,20 @@ public sealed class CMParser
             var lifeLp3Passes = 0;
             var lifeMidpointPasses = 0;
 
-            if (isLTO5Plus && cur.Length > 76 && cur[76] > 0)
+            if (isLTO5Plus && curUsage.Length > 76 && curUsage[76] > 0)
             {
-                suspendedAppendWrites = ReadUInt16BigEndian(cur, 28) - ReadUInt16BigEndian(prev, 28);
-                lp3Passes = ReadI32Be(cur, 68) - ReadI32Be(prev, 68);
-                midpointPasses = ReadI32Be(cur, 72) - ReadI32Be(prev, 72);
-                maxTapeTemp = cur[76];
-                lifeSuspendAppendWrites = ReadUInt16BigEndian(cur, 28);
-                lifeLp3Passes = ReadI32Be(cur, 68);
-                lifeMidpointPasses = ReadI32Be(cur, 72);
+                suspendedAppendWrites = ReadUInt16BigEndian(curUsage, 28) - ReadUInt16BigEndian(prevUsage, 28);
+                lp3Passes = ReadI32Be(curUsage, 68) - ReadI32Be(prevUsage, 68);
+                midpointPasses = ReadI32Be(curUsage, 72) - ReadI32Be(prevUsage, 72);
+                maxTapeTemp = curUsage[76];
+                lifeSuspendAppendWrites = ReadUInt16BigEndian(curUsage, 28);
+                lifeLp3Passes = ReadI32Be(curUsage, 68);
+                lifeMidpointPasses = ReadI32Be(curUsage, 72);
             }
 
             // HP mech-related block is appended after usage_page_len
             var ccqWriteFails = 0;
-            var c2RecovErrors = 0;
+            var c2RecoverErrors = 0;
             var directionChanges = 0;
             var tapePullingTime = 0;
             var tapeMetresPulled = 0;
@@ -490,25 +506,30 @@ public sealed class CMParser
 
             if (!string.IsNullOrEmpty(mechVendorId) && mechVendorId.Contains("HP", StringComparison.OrdinalIgnoreCase))
             {
-                var baseOff = usagePageLen; // appended starts here
-                var ccqWriteFailsRaw = ReadUInt64BigEndian(cur, baseOff + 0) - ReadUInt64BigEndian(prev, baseOff + 0);
+                var ccqWriteFailsRaw = ReadUInt64BigEndian(curMech, 0) - ReadUInt64BigEndian(prevMech, 0);
                 ccqWriteFails = ccqWriteFailsRaw <= 0 ? 0 : (ccqWriteFailsRaw > int.MaxValue ? int.MaxValue : (int)ccqWriteFailsRaw);
 
-                c2RecovErrors = ReadI32Be(cur, baseOff + 8) - ReadI32Be(prev, baseOff + 8);
-                directionChanges = ReadI32Be(cur, baseOff + 24) - ReadI32Be(prev, baseOff + 24);
-                tapePullingTime = ReadI32Be(cur, baseOff + 28) - ReadI32Be(prev, baseOff + 28);
-                tapeMetresPulled = ReadI32Be(cur, baseOff + 32);
-                repositions = ReadI32Be(cur, baseOff + 36) - ReadI32Be(prev, baseOff + 36);
-                totalLoadUnloads = ReadI32Be(cur, baseOff + 40);
-                streamFails = ReadI32Be(cur, baseOff + 44) - ReadI32Be(prev, baseOff + 44);
+                c2RecoverErrors = ReadI32Be(curMech, 8) - ReadI32Be(prevMech, 8);
+                directionChanges = ReadI32Be(curMech, 24) - ReadI32Be(prevMech, 24);
+                tapePullingTime = ReadI32Be(curMech, 28) - ReadI32Be(prevMech, 28);
 
-                var maxDriveTempRaw = ReadUInt16BigEndian(cur, baseOff + 48);
-                var minDriveTempRaw = ReadUInt16BigEndian(cur, baseOff + 50);
+                // 保留你原逻辑：tapeMetresPulled 取当前值（不是 delta）
+                tapeMetresPulled = ReadI32Be(curMech, 32);
+
+                repositions = ReadI32Be(curMech, 36) - ReadI32Be(prevMech, 36);
+
+                // 保留你原逻辑：totalLoadUnloads 取当前值（不是 delta）
+                totalLoadUnloads = ReadI32Be(curMech, 40);
+
+                streamFails = ReadI32Be(curMech, 44) - ReadI32Be(prevMech, 44);
+
+                var maxDriveTempRaw = ReadUInt16BigEndian(curMech, 48);
+                var minDriveTempRaw = ReadUInt16BigEndian(curMech, 50);
                 if (maxDriveTempRaw > 0) maxDriveTemp = maxDriveTempRaw / 256.0;
                 if (minDriveTempRaw > 0) minDriveTemp = minDriveTempRaw / 256.0;
 
                 // Clamp negatives to 0 (VB does that)
-                if (c2RecovErrors < 0) c2RecovErrors = 0;
+                if (c2RecoverErrors < 0) c2RecoverErrors = 0;
                 if (directionChanges < 0) directionChanges = 0;
                 if (tapePullingTime < 0) tapePullingTime = 0;
                 if (tapeMetresPulled < 0) tapeMetresPulled = 0;
@@ -517,7 +538,7 @@ public sealed class CMParser
 
                 // LifeTapeMetresPulled only when at_offset has 10 entries (LTO5+)
                 if (atOffset.Length >= 10)
-                    lifeTapeMetresPulled = ReadI32Be(cur, atOffset[9]);
+                    lifeTapeMetresPulled = ReadI32Be(curUsage, atOffset[9]);
             }
 
             // Clamp core counters to >= 0
@@ -534,7 +555,6 @@ public sealed class CMParser
             if (suspendedAppendWrites < 0) suspendedAppendWrites = 0;
             if (lp3Passes < 0) lp3Passes = 0;
             if (midpointPasses < 0) midpointPasses = 0;
-            if (lifeSuspendAppendWrites < 0) lifeSuspendAppendWrites = 0;
             if (lifeLp3Passes < 0) lifeLp3Passes = 0;
             if (lifeMidpointPasses < 0) lifeMidpointPasses = 0;
 
@@ -559,7 +579,7 @@ public sealed class CMParser
                 MidpointPasses: midpointPasses,
                 MaxTapeTemp: maxTapeTemp,
                 CCQWriteFails: ccqWriteFails,
-                C2RecovErrors: c2RecovErrors,
+                C2RecovErrors: c2RecoverErrors,
                 DirectionChanges: directionChanges,
                 TapePullingTime: tapePullingTime,
                 TapeMetresPulled: tapeMetresPulled,
@@ -582,18 +602,20 @@ public sealed class CMParser
                 LifeMidpointPasses: lifeMidpointPasses));
         }
 
-        static string ParseDriveSn(byte[] data, int offset, int len)
+        return;
+
+        static string ParseDriveSn(ReadOnlySpan<byte> data, int offset, int len)
         {
             // VB: if word at 12 != 0 then read string; strip, if >10 keep last 10
             if (offset + 2 <= data.Length)
             {
-                var w = BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(offset, 2));
+                var w = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(offset, 2));
                 if (w == 0) return "";
             }
 
             if (offset + len > data.Length) return "";
 
-            var sn = Encoding.ASCII.GetString(data, offset, len).TrimEnd();
+            var sn = Encoding.ASCII.GetString(data.Slice(offset, len)).TrimEnd();
             if (sn.Length > 10)
                 sn = sn[^10..];
             return sn;
@@ -655,7 +677,7 @@ public sealed class CMParser
     {
         PartitionEod.Clear();
 
-        int[] pageIds = { 0x104, 0x10E, 0x10F, 0x110 };
+        ReadOnlySpan<int> pageIds = [0x104, 0x10E, 0x10F, 0x110];
         for (var part = 0; part < 4; part++)
         {
             var pid = pageIds[part];
@@ -694,7 +716,7 @@ public sealed class CMParser
             typeMCartridge = (page[28] & 1) == 1;
 
         // Firmware ID offset varies for LTO-5
-        var fwOff = TapeCartridgeProfile.Format.Contains("LTO-5", StringComparison.OrdinalIgnoreCase) ? 48 : 52;
+        var fwOff = TapeCartridgeProfile.Id.LtoDensity != null && TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L5) ? 48 : 52;
         var driveFirmwareId = GetAsciiTrim(page, fwOff, 4);
 
         CartridgeContentData = new CartridgeContent(
@@ -706,16 +728,16 @@ public sealed class CMParser
 
         // VB: if LTO-7 and TypeM => "LTO-7 Type M" and wraps=168
         // TapeCartridgeProfile is treated as immutable; do NOT mutate Format in-place.
-        if (TapeCartridgeProfile.Format.Contains("LTO-7", StringComparison.OrdinalIgnoreCase) && typeMCartridge)
+        if (TapeCartridgeProfile.Id.LtoDensity != null && TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L7) && typeMCartridge)
         {
             _nWraps = 168;
 
             // Rebuild profile so CartridgeId resolution can take Type M into account (CartridgeTypeResolver uses `format`).
             // Preserve WORM suffix if present.
             var curFmt = TapeCartridgeProfile.Format;
-            if (curFmt.IndexOf("Type M", StringComparison.OrdinalIgnoreCase) < 0)
+            if (curFmt != null && !curFmt.Contains("Type M", StringComparison.OrdinalIgnoreCase))
             {
-                var isWorm = curFmt.IndexOf("WORM", StringComparison.OrdinalIgnoreCase) >= 0;
+                var isWorm = curFmt.Contains("WORM", StringComparison.OrdinalIgnoreCase);
                 var newFmt = isWorm ? "LTO-7 Type M WORM" : "LTO-7 Type M";
 
                 TapeCartridgeProfile = new TapeCartridgeProfile(
@@ -751,7 +773,7 @@ public sealed class CMParser
 
         // Determine header length by format generation
         // VB has multiple branches; for HP LTO we follow the LTO rules.
-        if (TapeCartridgeProfile.IsLaterThan(LTODensityCode.L6))
+        if (TapeCartridgeProfile != null && TapeCartridgeProfile.IsLaterThan(LTODensityCode.L6))
         {
             _hdrLen = 48;
             TapeDirectoryData.FidTapeWritePassPartition0 = ReadI32Be(page, 4);
@@ -762,7 +784,7 @@ public sealed class CMParser
         else
         {
             _hdrLen = 16;
-            if (TapeCartridgeProfile.IsLaterThan(LTODensityCode.L4))
+            if (TapeCartridgeProfile != null && TapeCartridgeProfile.IsLaterThan(LTODensityCode.L4))
             {
                 TapeDirectoryData.FidTapeWritePassPartition0 = ReadI32Be(page, 4);
                 TapeDirectoryData.FidTapeWritePassPartition1 = ReadI32Be(page, 8);
@@ -776,7 +798,19 @@ public sealed class CMParser
         uint lastId = 0;
         var eods = PartitionEod.ToArray();
 
-        for (var wi = 0; wi < _nWraps; wi++)
+        var wrapsToRead = _nWraps;
+        if (_tapeDirEntryLen > 0 && _hdrLen >= 0 && page.Length > _hdrLen)
+        {
+            var maxWrapsByLen = (page.Length - _hdrLen) / _tapeDirEntryLen;
+            if (wrapsToRead > maxWrapsByLen)
+                wrapsToRead = maxWrapsByLen;
+        }
+        else
+        {
+            wrapsToRead = 0;
+        }
+
+        for (var wi = 0; wi < wrapsToRead; wi++)
         {
             var entryOff = _hdrLen + _tapeDirEntryLen * wi;
             if (entryOff + 8 > page.Length)
@@ -784,31 +818,24 @@ public sealed class CMParser
 
             var setId = ReadUInt32BigEndian(page, entryOff + 4);
 
-            if (setId == UnusedWrapIdentifier)
+            switch (setId)
             {
-                TapeDirectoryData.CapacityLoss.Add(-1);
-                continue;
-            }
-            if (setId == GuardWrapIdentifier)
-            {
-                TapeDirectoryData.CapacityLoss.Add(-3);
-                continue;
-            }
-            if (setId == 0)
-            {
-                TapeDirectoryData.CapacityLoss.Add(0);
-                continue;
+                case UnusedWrapIdentifier:
+                    TapeDirectoryData.CapacityLoss.Add(-1);
+                    continue;
+                case GuardWrapIdentifier:
+                    TapeDirectoryData.CapacityLoss.Add(-3);
+                    continue;
+                case 0:
+                    TapeDirectoryData.CapacityLoss.Add(0);
+                    continue;
             }
 
             var isEodWrap = false;
-            foreach (var e in eods)
+            if (eods.Any(e => e.Validity != 0 && e.WrapNumber == wi))
             {
-                if (e.Validity != 0 && e.WrapNumber == wi)
-                {
-                    TapeDirectoryData.CapacityLoss.Add(-2);
-                    isEodWrap = true;
-                    break;
-                }
+                TapeDirectoryData.CapacityLoss.Add(-2);
+                isEodWrap = true;
             }
 
             if (!isEodWrap)
@@ -828,7 +855,7 @@ public sealed class CMParser
 
         // DatasetsOnWrapData computation (VB second loop)
         lastId = 0;
-        for (var wi = 0; wi < _nWraps; wi++)
+        for (var wi = 0; wi < wrapsToRead; wi++)
         {
             var entryOff = _hdrLen + _tapeDirEntryLen * wi;
             if (entryOff + 8 > page.Length)
@@ -858,7 +885,7 @@ public sealed class CMParser
         int wrapsInDrive;
         var hdr = _hdrLen;
 
-        if (TapeCartridgeProfile.Format.Contains("LTO-1", StringComparison.OrdinalIgnoreCase))
+        if (TapeCartridgeProfile is { Id.LtoDensity: not null } && TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L1))
         {
             wrapsInDrive = 48;
             hdr = 16;
@@ -876,14 +903,15 @@ public sealed class CMParser
 
                 var e = TapeDirectoryData.GetWrapEntry(wi, createNew: true)!;
                 e.Content = $"{evenDs,-12}{evenRc,-12}{evenFm,-12}{evenCrc,-12}{oddDs,-12}{oddRc,-12}{oddFm,-12}{oddCrc,-12}";
-                e.RawData = new[] { (int)evenDs, (int)evenRc, (int)evenFm, (int)evenCrc, (int)oddDs, (int)oddRc, (int)oddFm, (int)oddCrc };
+                e.RawData = [(int)evenDs, (int)evenRc, (int)evenFm, (int)evenCrc, (int)oddDs, (int)oddRc, (int)oddFm, (int)oddCrc
+                ];
                 e.RecCount = (int)(evenRc + oddRc);
                 e.FileMarkCount = (int)(evenFm + oddFm);
             }
             return;
         }
 
-        if (TapeCartridgeProfile.Format.Contains("LTO-2", StringComparison.OrdinalIgnoreCase))
+        if (TapeCartridgeProfile is { Id.LtoDensity: not null } && TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L2))
         {
             wrapsInDrive = 64;
             hdr = 16;
@@ -899,7 +927,7 @@ public sealed class CMParser
 
                 var e = TapeDirectoryData.GetWrapEntry(wi, createNew: true)!;
                 e.Content = $"{wp,-12}{ds,-12}{howRc,-12}{eowRc,-12}{howFm,-12}{eowFm,-12}{crc,-12}";
-                e.RawData = new[] { (int)ds, (int)howRc, (int)eowRc, (int)howFm, (int)eowFm, (int)crc };
+                e.RawData = [(int)ds, (int)howRc, (int)eowRc, (int)howFm, (int)eowFm, (int)crc];
                 e.RecCount = (int)(howRc + eowRc);
                 e.FileMarkCount = (int)(howFm + eowFm);
             }
@@ -923,7 +951,7 @@ public sealed class CMParser
 
             var e = TapeDirectoryData.GetWrapEntry(wi, createNew: true)!;
             e.Content = $"{wp,-12}{ds,-12}{howRc,-12}{eowRc,-12}{howFm,-12}{eowFm,-12}{fmMap,-12}{crc,-12}";
-            e.RawData = new[] { (int)ds, (int)howRc, (int)eowRc, (int)howFm, (int)eowFm, (int)fmMap, (int)crc };
+            e.RawData = [(int)ds, (int)howRc, (int)eowRc, (int)howFm, (int)eowFm, (int)fmMap, (int)crc];
             e.RecCount = (int)(howRc + eowRc);
             e.FileMarkCount = (int)(howFm + eowFm);
         }
@@ -935,9 +963,9 @@ public sealed class CMParser
             return;
 
         int slots;
-        if (!TapeCartridgeProfile.IsLaterThan(LTODensityCode.L5))
+        if (TapeCartridgeProfile != null && !TapeCartridgeProfile.IsLaterThan(LTODensityCode.L5))
             slots = 14;
-        else if (TapeCartridgeProfile.Format.Contains("LTO-5", StringComparison.OrdinalIgnoreCase))
+        else if (TapeCartridgeProfile is { Id.LtoDensity: not null } && TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L5))
             slots = 22;
         else
             slots = 38; // LTO-6/7/8/9 (VB uses 38)
@@ -987,23 +1015,24 @@ public sealed class CMParser
             if (valOff + attrLen > page.Length)
                 break;
 
-            if (attrId == 0x0806)
+            switch (attrId)
             {
-                var bc = GetAsciiTrim(page, valOff, attrLen);
-                if (!string.IsNullOrEmpty(bc))
-                    barcode = bc;
-            }
-            else if (attrId == 0x0800)
-            {
-                appVendor = GetAsciiTrim(page, valOff, attrLen);
-            }
-            else if (attrId == 0x0801)
-            {
-                appName = GetAsciiTrim(page, valOff, attrLen);
-            }
-            else if (attrId == 0x0802)
-            {
-                appVersion = GetAsciiTrim(page, valOff, attrLen);
+                case 0x0806:
+                    {
+                        var bc = GetAsciiTrim(page, valOff, attrLen);
+                        if (!string.IsNullOrEmpty(bc))
+                            barcode = bc;
+                        break;
+                    }
+                case 0x0800:
+                    appVendor = GetAsciiTrim(page, valOff, attrLen);
+                    break;
+                case 0x0801:
+                    appName = GetAsciiTrim(page, valOff, attrLen);
+                    break;
+                case 0x0802:
+                    appVersion = GetAsciiTrim(page, valOff, attrLen);
+                    break;
             }
 
             idx += 4 + attrLen;
@@ -1040,4 +1069,11 @@ public sealed class CMParser
         if (offset + length > s.Length) return "";
         return Encoding.ASCII.GetString(s.Slice(offset, length)).TrimEnd('\0').TrimEnd();
     }
+
+    private readonly record struct UsageSnapshot(
+        int Index,
+        int UsageOffset,
+        int UsageLength,
+        int MechOffset,
+        int ThreadCount);
 }
