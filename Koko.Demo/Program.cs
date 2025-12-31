@@ -1,6 +1,11 @@
+using BenchmarkDotNet.Running;
+
 using Koko.Core.Scsi.Parsers;
+using Koko.Demo;
 
 using Serilog;
+
+using System.Diagnostics;
 var startStamp = DateTimeOffset.Now.ToString("yyyyMMdd-HHmmss");
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Verbose()
@@ -24,8 +29,12 @@ Log.Logger = new LoggerConfiguration()
 
 //lto.GetInquiry();
 var data = File.ReadAllBytes("R:/test2.cm");
-
+var sw = new Stopwatch();
+sw.Start();
 var cm = CMParser.CreateFromSpan(data);
+sw.Stop();
+Log.Information("{@time}", sw.Elapsed);
 Log.Information("{@cm}", cm);
 
 Console.ReadLine();
+//BenchmarkRunner.Run<CmBench>();
