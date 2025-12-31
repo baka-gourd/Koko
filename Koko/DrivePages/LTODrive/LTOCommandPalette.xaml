@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+
 <Page
     x:Class="Koko.DrivePages.LTODrive.LTOCommandPalette"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -8,133 +9,321 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:dev="using:DevWinUI"
     xmlns:core="using:Koko.Core.Scsi"
-    xmlns:helpers="using:Koko.Helpers"
+    xmlns:controls="using:CommunityToolkit.WinUI.Controls"
+
     mc:Ignorable="d">
 
-    <Grid Padding="8" RowSpacing="8">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
+    <Grid Padding="36,16,16,36">
+        <Grid.ColumnDefinitions>
+            <!-- 主内容区 -->
+            <ColumnDefinition Width="*" MinWidth="480" />
 
-        <!-- Row 0 -->
-        <Grid Grid.Row="0" ColumnSpacing="8">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto"/>
-                <!-- Command label -->
-                <ColumnDefinition Width="*"/>
-                <!-- Command -->
-                <ColumnDefinition Width="Auto"/>
-                <!-- Timeout -->
-            </Grid.ColumnDefinitions>
+            <!-- Splitter -->
+            <ColumnDefinition Width="16" />
 
-            <TextBlock
-                Grid.Column="0"
-                Text="Command:"
-                VerticalAlignment="Center"/>
+            <!-- 右侧 Tool Pane（初始宽度 380，可拖） -->
+            <ColumnDefinition Width="*" MinWidth="280" MaxWidth="1600" />
+        </Grid.ColumnDefinitions>
 
+        <Grid Grid.Column="0" RowSpacing="8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- Row 0（原样保留） -->
+            <Grid Grid.Row="0" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0" Text="Command:" VerticalAlignment="Center" />
+
+                <TextBox
+                    Grid.Column="1"
+                    FontFamily="Consolas"
+                    dev:TextBoxExtensions.CustomMask="h:[0-9a-fA-F]"
+                    dev:TextBoxExtensions.Mask="hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh"
+                    Text="{Binding ScsiCommandDisplay, Mode=TwoWay}" />
+
+                <NumberBox
+                    Grid.Column="2"
+                    PlaceholderText="Timeout"
+                    Width="96"
+                    Value="{Binding Timeout, Mode=TwoWay}" />
+            </Grid>
+
+            <!-- Row 1（原样保留，建议把 Send 按钮放到最后一列） -->
+            <Grid Grid.Row="1" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0" Text="DataDirection:" VerticalAlignment="Center" />
+
+                <ComboBox
+                    Grid.Column="1"
+                    Width="128"
+                    ItemsSource="{dev:EnumValues Type=core:DataDirection}"
+                    SelectedItem="{Binding Direction}" />
+
+                <TextBlock Grid.Column="2" Text="Data:" VerticalAlignment="Center" />
+
+                <TextBox
+                    Grid.Column="3"
+                    PlaceholderText="Data"
+                    FontFamily="Consolas"
+                    Text="{Binding ScsiDataDisplay, Mode=TwoWay}" />
+
+                <Button
+                    Grid.Column="4"
+                    Command="{Binding SendScsiCommand}"
+                    x:Uid="LTOCP_Send"
+                    Width="96" />
+            </Grid>
+
+            <!-- Row 2（原样保留） -->
             <TextBox
-                Grid.Column="1"
+                Grid.Row="2"
+                AcceptsReturn="True"
                 FontFamily="Consolas"
-                dev:TextBoxExtensions.CustomMask="h:[0-9a-fA-F]"
-                dev:TextBoxExtensions.Mask="hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh-hh"
-                Text="{Binding ScsiCommandDisplay, Mode=TwoWay}"/>
-
-            <NumberBox
-                Grid.Column="2"
-                PlaceholderText="Timeout"
-                Width="96"
-                Value="{Binding Timeout, Mode=TwoWay}"/>
+                x:Name="InfoBox"
+                IsReadOnly="True"
+                ContextFlyout="{x:Null}"
+                Text="{Binding InfoText, Mode=OneWay}"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Stretch"
+                Margin="0" />
         </Grid>
 
-        <!-- Row 1 -->
-        <Grid Grid.Row="1" ColumnSpacing="8">
+        <controls:GridSplitter
+            Grid.Column="1"
+            Width="16"
+            HorizontalAlignment="Right"
+            ResizeBehavior="PreviousAndNext"
+            ResizeDirection="Columns">
+        </controls:GridSplitter>
+
+        <Grid Grid.Column="2" ColumnSpacing="8">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto"/>
-                <!-- DataDirection label -->
-                <ColumnDefinition Width="Auto"/>
-                <!-- ComboBox -->
-                <ColumnDefinition Width="Auto"/>
-                <!-- Data label -->
-                <ColumnDefinition Width="*"/>
-                <!-- Data TextBox -->
-                <ColumnDefinition Width="Auto"/>
-                <!-- Send -->
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <!-- DataDirection -->
-            <TextBlock
-                Grid.Column="0"
-                Text="DataDirection:"
-                VerticalAlignment="Center"/>
+            <!-- 建议加 ScrollViewer，侧栏内容往往会超高 -->
+            <Border Grid.Column="0"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1,0,0,0"
+                    CornerRadius="4">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <ContentControl x:Name="TabContent" HorizontalAlignment="Stretch" />
+                </ScrollViewer>
+            </Border>
 
-            <ComboBox
+            <dev:SelectorBarSegmented
                 Grid.Column="1"
-                Width="128"
-                ItemsSource="{dev:EnumValues Type=core:DataDirection}"
-                SelectedItem="{Binding Direction}"/>
-
-            <!-- Data -->
-            <TextBlock
-                Grid.Column="2"
-                Text="Data:"
-                VerticalAlignment="Center"/>
-
-            <TextBox
-                Grid.Column="3"
-                PlaceholderText="Data"
-                FontFamily="Consolas"
-                Text="{Binding ScsiDataDisplay, Mode=TwoWay}"/>
-
-            <!-- Send -->
-            <Button
-                Command="{Binding SendScsiCommand}"
-                Grid.Column="4"
-                x:Uid="LTOCP_Send"
-                Width="96"/>
-        </Grid>
-
-        <TextBox
-            AcceptsReturn="True"
-            FontFamily="Consolas"
-            x:Name="InfoBox"
-            IsReadOnly="True"
-            ContextFlyout="{x:Null}"
-            Text="{Binding InfoText, Mode=OneWay}"
-            Grid.Row="2"
-            HorizontalAlignment="Stretch"
-            VerticalAlignment="Stretch"
-            Margin="0" />
-        <Grid Grid.Row="3">
-            <dev:SelectorBarSegmented>
-                <SelectorBarItem x:Uid="LTOCP_ToolBar_Command">
+                x:Name="Tabs"
+                SelectionMode="Single"
+                Orientation="Vertical"
+                VerticalAlignment="Top"
+                BorderThickness="0"
+                SelectionChanged="Tabs_OnSelectionChanged"
+                Background="{x:Null}">
+                <SelectorBarItem IsSelected="True" x:Name="Command" Padding="12,12,16,12">
+                    <ToolTipService.ToolTip>
+                        <ToolTip Content="114514"></ToolTip>
+                    </ToolTipService.ToolTip>
                     <SelectorBarItem.Icon>
-                        <FontIcon Glyph="&#xEB3B;" />
+                        <FontIcon Glyph="&#xEB3B;" FontSize="32" />
                     </SelectorBarItem.Icon>
                 </SelectorBarItem>
-                <SelectorBarItem x:Uid="LTOCP_ToolBar_Buffer" >
+                <SelectorBarItem x:Name="Buffer" Padding="12,12,16,12">
                     <SelectorBarItem.Icon>
-                        <FontIcon Glyph="&#xF000;" />
+                        <FontIcon Glyph="&#xF000;" FontSize="32" />
                     </SelectorBarItem.Icon>
                 </SelectorBarItem>
-                <SelectorBarItem x:Uid="LTOCP_ToolBar_MAM" >
+                <SelectorBarItem x:Name="MAM" Padding="12,12,16,12">
                     <SelectorBarItem.Icon>
-                        <FontIcon Glyph="&#xE8D2;" />
+                        <FontIcon Glyph="&#xE8D2;" FontSize="32" />
                     </SelectorBarItem.Icon>
                 </SelectorBarItem>
-                <SelectorBarItem x:Uid="LTOCP_ToolBar_Log" >
+                <SelectorBarItem x:Name="Log" Padding="12,12,16,12">
                     <SelectorBarItem.Icon>
-                        <FontIcon Glyph="&#xE8A5;" />
+                        <FontIcon Glyph="&#xE8A5;" FontSize="32" />
                     </SelectorBarItem.Icon>
                 </SelectorBarItem>
-                <SelectorBarItem x:Uid="LTOCP_ToolBar_Test" >
+                <SelectorBarItem x:Name="Test" Padding="12,12,16,12">
                     <SelectorBarItem.Icon>
-                        <FontIcon Glyph="&#xEC7A;" />
+                        <FontIcon Glyph="&#xEC7A;" FontSize="32" />
                     </SelectorBarItem.Icon>
                 </SelectorBarItem>
             </dev:SelectorBarSegmented>
         </Grid>
     </Grid>
+
+    <Page.Resources>
+        <DataTemplate x:Key="TplCommand">
+            <Grid>
+                <controls:WrapPanel HorizontalSpacing="12" VerticalSpacing="12" HorizontalAlignment="Stretch"
+                                    Padding="8">
+                    <Button
+                        Content="Rewind"
+                        VerticalAlignment="Center"
+                        VerticalContentAlignment="Center" />
+
+                    <Border Width="{Binding RelativeSource={RelativeSource TemplatedParent}, Path=ActualWidth}"
+                            Height="0" />
+
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Text="Partition" Margin="16,0,0,0" VerticalAlignment="Center" />
+
+                        <NumberBox
+                            Width="96"
+                            Value="0"
+                            SpinButtonPlacementMode="Compact"
+                            SmallChange="1"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <ComboBox
+                            Width="96"
+                            SelectedIndex="0"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center">
+                            <ComboBoxItem Content="Block" />
+                            <ComboBoxItem Content="Filemark" />
+                            <ComboBoxItem Content="EOD" />
+                        </ComboBox>
+
+                        <NumberBox
+                            Width="128"
+                            Value="0"
+                            SpinButtonPlacementMode="Compact"
+                            SmallChange="1"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center" />
+                    </StackPanel>
+
+                    <Button Content="Locate"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center" />
+
+                    <Border Width="{Binding RelativeSource={RelativeSource TemplatedParent}, Path=ActualWidth}"
+                            Height="0" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="StartDump"
+                                VerticalAlignment="Center"
+                                VerticalContentAlignment="Center" />
+
+                        <Button
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center">
+                            <FontIcon Glyph="&#xEE95;" FontSize="18"
+                                      Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                        </Button>
+                    </StackPanel>
+
+                    <!--<CheckBox
+                        Content="log"
+                        VerticalAlignment="Center" />-->
+
+
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Text="Block Limit" VerticalAlignment="Center" />
+
+                        <NumberBox
+                            Width="128"
+                            Value="524288"
+                            SpinButtonPlacementMode="Compact"
+                            SmallChange="1"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center" />
+                    </StackPanel>
+
+                    <Button
+                        Content="Read Block"
+                        VerticalAlignment="Center"
+                        VerticalContentAlignment="Center" />
+                    <Border Width="{Binding RelativeSource={RelativeSource TemplatedParent}, Path=ActualWidth}"
+                            Height="0" />
+
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Text="Partial Erase" VerticalAlignment="Center" />
+
+                        <NumberBox
+                            Width="128"
+                            Value="1"
+                            SpinButtonPlacementMode="Compact"
+                            SmallChange="1"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center" />
+                    </StackPanel>
+
+                    <Button Content="Erase"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center" />
+
+                    <Button Content="Format"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center" />
+
+                    <Button Content="Read Pos"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center" />
+
+                    <Button Content="Load Index"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center" />
+
+                    <Button Content="Release Unit"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center" />
+
+                    <Button Content="Allow Media Removal"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center" />
+
+                    <Button Content="Read CM"
+                            Style="{StaticResource AccentButtonStyle}"
+                            VerticalAlignment="Center"
+                            VerticalContentAlignment="Center" />
+
+                </controls:WrapPanel>
+            </Grid>
+        </DataTemplate>
+
+        <DataTemplate x:Key="TplBuffer">
+            <StackPanel Spacing="12" Padding="0,12">
+                <Button Content="Test (Buffer)" />
+            </StackPanel>
+        </DataTemplate>
+
+        <DataTemplate x:Key="TplMam">
+            <StackPanel Spacing="12" Padding="0,12">
+                <Button Content="Test (MAM)" />
+            </StackPanel>
+        </DataTemplate>
+
+        <DataTemplate x:Key="TplLog">
+            <StackPanel Spacing="12" Padding="0,12">
+                <Button Content="Test (Log)" />
+            </StackPanel>
+        </DataTemplate>
+
+        <DataTemplate x:Key="TplTest">
+            <StackPanel Spacing="12" Padding="0,12">
+                <Button Content="Test (Test)" />
+            </StackPanel>
+        </DataTemplate>
+    </Page.Resources>
 </Page>

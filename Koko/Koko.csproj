@@ -49,11 +49,14 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <PackageReference Include="CommunityToolkit.WinUI.Controls.Primitives" Version="8.2.251219" />
+    <PackageReference Include="CommunityToolkit.WinUI.Controls.Sizers" Version="8.2.251219" />
+    <PackageReference Include="CommunityToolkit.WinUI.Triggers" Version="8.2.251219" />
     <PackageReference Include="DevWinUI" Version="9.8.1" />
     <PackageReference Include="DevWinUI.Controls" Version="9.8.1" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7175" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.251106002" />
-    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="8.0.0-dev-02318" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Koko.Core\Koko.Core.csproj" />
@@ -67,9 +70,6 @@
     <Page Update="DrivePages\LTODrive\LTOCommandPalette.xaml">
       <Generator>MSBuild:Compile</Generator>
     </Page>
-  </ItemGroup>
-  <ItemGroup>
-    <Folder Include="Helpers\" />
   </ItemGroup>
 
   <!--
