@@ -1354,6 +1354,9 @@ public sealed class CMParser
                     AppendRow("Partitions", "Not available");
                 }
             }
+
+            AppendSectionHeader("WRAP CAPACITY");
+            AppendWrapCapacityAnalysis();
         }
         AppendSectionHeader("CM DATA");
         AppendRow("Length", _cm.Length.ToString(CultureInfo.InvariantCulture));
@@ -1377,6 +1380,85 @@ public sealed class CMParser
                 ? BuildHighlightedValue(valueText, valueWidth)
                 : FitRight(valueText, valueWidth);
             output.AppendLine($"│ {FitLeft(labelText, labelWidth)} │ {valueCell} │");
+        }
+
+        void AppendWrapCapacityAnalysis()
+        {
+            if (TapeDirectoryData.CapacityLoss.Count == 0 || _nWraps <= 0)
+            {
+                AppendRow("Wraps", "Not available");
+                return;
+            }
+
+            var kbPerDataset = GetKbPerDataset();
+            var wrapsToRead = _nWraps;
+            if (wrapsToRead > TapeDirectoryData.CapacityLoss.Count)
+                wrapsToRead = TapeDirectoryData.CapacityLoss.Count;
+
+            var wraps = new List<(int Index, double Loss, string? SetsText, string? PctText, string? SizeText)>();
+            for (var wi = 0; wi < wrapsToRead; wi++)
+            {
+                var datasetEntry = TapeDirectoryData.GetDatasetsOnWrap(wi, createNew: false);
+                if (datasetEntry == null)
+                {
+                    if (wi == 0)
+                        AppendRow("Wraps", "Not available");
+                    break;
+                }
+
+                var datasetCount = datasetEntry.Data;
+                if (datasetCount < 0)
+                    datasetCount = 0;
+
+                var loss = GetCapacityLoss(wi);
+                var sizeText = BuildWrapCapacitySizeText(datasetCount, kbPerDataset);
+                string? setsText = null;
+                string? pctText = null;
+                if (loss is not (-1 or -3))
+                {
+                    if (_setsPerWrap > 0)
+                    {
+                        setsText = $"Sets {datasetCount.ToString(CultureInfo.InvariantCulture)}/{_setsPerWrap.ToString(CultureInfo.InvariantCulture)}";
+                        var pct = datasetCount / (double)_setsPerWrap * 100.0;
+                        pctText = $"{pct.ToString("f2", CultureInfo.InvariantCulture)}%";
+                    }
+                    else
+                    {
+                        setsText = $"Sets {datasetCount.ToString(CultureInfo.InvariantCulture)}";
+                    }
+                }
+
+                wraps.Add((wi, loss, setsText, pctText, sizeText));
+            }
+
+            if (wraps.Count == 0)
+                return;
+
+            var setsWidth = 0;
+            var pctWidth = 0;
+            var sizeWidth = 0;
+            foreach (var wrap in wraps)
+            {
+                if (!string.IsNullOrEmpty(wrap.SetsText) && wrap.SetsText.Length > setsWidth)
+                    setsWidth = wrap.SetsText.Length;
+                if (!string.IsNullOrEmpty(wrap.PctText) && wrap.PctText.Length > pctWidth)
+                    pctWidth = wrap.PctText.Length;
+                if (!string.IsNullOrEmpty(wrap.SizeText) && wrap.SizeText.Length > sizeWidth)
+                    sizeWidth = wrap.SizeText.Length;
+            }
+
+            foreach (var wrap in wraps)
+            {
+                var valueText = BuildWrapCapacityValue(
+                    wrap.Loss,
+                    wrap.SetsText,
+                    setsWidth,
+                    wrap.PctText,
+                    pctWidth,
+                    wrap.SizeText,
+                    sizeWidth);
+                AppendRow($"Wrap {wrap.Index:D3}", valueText);
+            }
         }
 
         void AppendBottomBorder()
@@ -1461,6 +1543,45 @@ public sealed class CMParser
             if (!value.HasValue) return "—";
             var numStr = value.Value.ToString(CultureInfo.InvariantCulture);
             return value.Value == 0 ? $"{numStr} ✓" : numStr;
+        }
+
+        string? BuildWrapCapacitySizeText(int datasetCount, ByteSize kbPerDataset)
+        {
+            if (kbPerDataset.Bytes <= 0)
+                return null;
+
+            var bytes = (datasetCount * kbPerDataset.Kilobytes).Kilobytes();
+            return FormatSizeBytes(bytes);
+        }
+
+        string BuildWrapCapacityValue(
+            double loss,
+            string? setsText,
+            int setsWidth,
+            string? pctText,
+            int pctWidth,
+            string? sizeText,
+            int sizeWidth)
+        {
+            if (loss == -1)
+                return "Unused";
+            if (loss == -3)
+                return "Guard wrap";
+
+            var parts = new List<string>();
+            if (loss == -2)
+                parts.Add("EOD");
+
+            if (!string.IsNullOrEmpty(setsText))
+                parts.Add(setsWidth > 0 ? setsText.PadRight(setsWidth) : setsText);
+
+            if (!string.IsNullOrEmpty(pctText))
+                parts.Add(pctWidth > 0 ? pctText.PadLeft(pctWidth) : pctText);
+
+            if (!string.IsNullOrEmpty(sizeText))
+                parts.Add(sizeWidth > 0 ? sizeText.PadLeft(sizeWidth) : sizeText);
+
+            return string.Join(" · ", parts);
         }
 
         static List<string> SplitToFit(string text, int maxWidth)
