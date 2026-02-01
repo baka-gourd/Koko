@@ -14,6 +14,7 @@ using System.ComponentModel;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Koko.Core.Helpers;
 using Koko.Helpers;
 using Koko.Core.Scsi.Parsers;
 

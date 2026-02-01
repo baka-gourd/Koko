@@ -1,7 +1,6 @@
-using System;
 using System.Text;
 
-namespace Koko.Helpers;
+namespace Koko.Core.Helpers;
 
 public static class HexDump
 {
@@ -56,5 +55,5 @@ public static class HexDump
     }
 
     private static bool IsPrintableAscii(byte b)
-        => b >= 0x20 && b <= 0x7E;
+        => b is >= 0x20 and <= 0x7E;
 }
