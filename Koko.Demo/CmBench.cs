@@ -12,7 +12,7 @@ public class CmBench
     [GlobalSetup]
     public void Setup()
     {
-        _data = File.ReadAllBytes("R:/test2.cm");
+        _data = File.ReadAllBytes("R:/cm.bin");
         _ = CMParser.CreateFromSpan(_data); // warmup
     }
 

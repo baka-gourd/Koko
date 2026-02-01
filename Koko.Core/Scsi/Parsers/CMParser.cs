@@ -1,8 +1,9 @@
 using Koko.Core.Scsi.Codes.Cartridges;
-
 using System.Buffers.Binary;
+using System.Globalization;
 using System.Text;
-
+using Humanizer;
+using Koko.Core.Helpers;
 using Serilog;
 
 namespace Koko.Core.Scsi.Parsers;
@@ -12,6 +13,7 @@ public sealed class CMParser
     private const uint GuardWrapIdentifier = 0xFFFFFFFE;
     private const uint UnusedWrapIdentifier = 0xFFFFFFFF;
     private readonly ReadOnlyMemory<byte> _cm;
+
     private CMParser(ReadOnlyMemory<byte> cm)
     {
         _cm = cm;
@@ -36,10 +38,10 @@ public sealed class CMParser
 
     #endregion
 
-    private int _nWraps;               // a_NWraps
-    private int _setsPerWrap;         // a_SetsPerWrap
+    private int _nWraps; // a_NWraps
+    private int _setsPerWrap; // a_SetsPerWrap
     private int _tapeDirEntryLen = 16; // a_TapeDirLength (16/28/32 etc)
-    private int _hdrLen;               // a_HdrLength
+    private int _hdrLen; // a_HdrLength
 
     private readonly Dictionary<int, Page> _pageById = new();
 
@@ -97,15 +99,15 @@ public sealed class CMParser
         ParsePageTables(warn);
 
         // 2) Parse key pages (mirrors VB flow at a high level)
-        ParseCartridgeMfgPage(warn);       // page id 1
-        ParseMediaMfgPage(warn);           // page id 2
-        ParseUsagePagesIfPresent(warn);    // 0x108..0x10B + 0x106
-        ParseStatusPage(warn);             // 0x105
-        ParseInitialisationPage(warn);     // 0x101
-        ParseEodPages(warn);               // 0x104 / 0x10E / 0x10F / 0x110
+        ParseCartridgeMfgPage(warn); // page id 1
+        ParseMediaMfgPage(warn); // page id 2
+        ParseUsagePagesIfPresent(warn); // 0x108..0x10B + 0x106
+        ParseStatusPage(warn); // 0x105
+        ParseInitialisationPage(warn); // 0x101
+        ParseEodPages(warn); // 0x104 / 0x10E / 0x10F / 0x110
         ParseCartridgeContentIfPresent(warn); // 0x10D (LTO5+)
-        ParseTapeDirectoryPage(warn);      // 0x103
-        ParseSuspendedWritesPage(warn);    // 0x107
+        ParseTapeDirectoryPage(warn); // 0x103
+        ParseSuspendedWritesPage(warn); // 0x107
         ParseApplicationSpecificPage(warn); // 0x200 (MAM001/2 attribute list)
     }
 
@@ -167,7 +169,8 @@ public sealed class CMParser
             {
                 var headerWord0 = ReadUInt16BigEndian(cm, pageOffset);
                 if (headerWord0 != tableWord0)
-                    warn($"CM Page Header Error: Offset={pageOffset} expected=0x{tableWord0:X4} actual=0x{headerWord0:X4}");
+                    warn(
+                        $"CM Page Header Error: Offset={pageOffset} expected=0x{tableWord0:X4} actual=0x{headerWord0:X4}");
             }
 
             PageData.Add(p);
@@ -457,10 +460,13 @@ public sealed class CMParser
             var totalSets = ReadUInt64BigEndian(curUsage, atOffset[1]) + ReadUInt64BigEndian(curUsage, atOffset[2]);
             var writeRetries = ReadI32Be(curUsage, atOffset[3]) - ReadI32Be(prevUsage, atOffset[3]);
             var readRetries = ReadI32Be(curUsage, atOffset[4]) - ReadI32Be(prevUsage, atOffset[4]);
-            var unRecovWrites = ReadUInt16BigEndian(curUsage, atOffset[5]) - ReadUInt16BigEndian(prevUsage, atOffset[5]);
+            var unRecovWrites = ReadUInt16BigEndian(curUsage, atOffset[5]) -
+                                ReadUInt16BigEndian(prevUsage, atOffset[5]);
             var unRecovReads = ReadUInt16BigEndian(curUsage, atOffset[6]) - ReadUInt16BigEndian(prevUsage, atOffset[6]);
-            var suspendedWrites = ReadUInt16BigEndian(curUsage, atOffset[7]) - ReadUInt16BigEndian(prevUsage, atOffset[7]);
-            var fatalSusWrites = ReadUInt16BigEndian(curUsage, atOffset[8]) - ReadUInt16BigEndian(prevUsage, atOffset[8]);
+            var suspendedWrites =
+                ReadUInt16BigEndian(curUsage, atOffset[7]) - ReadUInt16BigEndian(prevUsage, atOffset[7]);
+            var fatalSusWrites =
+                ReadUInt16BigEndian(curUsage, atOffset[8]) - ReadUInt16BigEndian(prevUsage, atOffset[8]);
 
             var lifeSetsWritten = ReadUInt64BigEndian(curUsage, atOffset[1]);
             var lifeSetsRead = ReadUInt64BigEndian(curUsage, atOffset[2]);
@@ -507,7 +513,9 @@ public sealed class CMParser
             if (!string.IsNullOrEmpty(mechVendorId) && mechVendorId.Contains("HP", StringComparison.OrdinalIgnoreCase))
             {
                 var ccqWriteFailsRaw = ReadUInt64BigEndian(curMech, 0) - ReadUInt64BigEndian(prevMech, 0);
-                ccqWriteFails = ccqWriteFailsRaw <= 0 ? 0 : (ccqWriteFailsRaw > int.MaxValue ? int.MaxValue : (int)ccqWriteFailsRaw);
+                ccqWriteFails = ccqWriteFailsRaw <= 0
+                    ? 0
+                    : (ccqWriteFailsRaw > int.MaxValue ? int.MaxValue : (int)ccqWriteFailsRaw);
 
                 c2RecoverErrors = ReadI32Be(curMech, 8) - ReadI32Be(prevMech, 8);
                 directionChanges = ReadI32Be(curMech, 24) - ReadI32Be(prevMech, 24);
@@ -716,7 +724,10 @@ public sealed class CMParser
             typeMCartridge = (page[28] & 1) == 1;
 
         // Firmware ID offset varies for LTO-5
-        var fwOff = TapeCartridgeProfile.Id.LtoDensity != null && TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L5) ? 48 : 52;
+        var fwOff = TapeCartridgeProfile.Id.LtoDensity != null &&
+                    TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L5)
+            ? 48
+            : 52;
         var driveFirmwareId = GetAsciiTrim(page, fwOff, 4);
 
         CartridgeContentData = new CartridgeContent(
@@ -728,7 +739,8 @@ public sealed class CMParser
 
         // VB: if LTO-7 and TypeM => "LTO-7 Type M" and wraps=168
         // TapeCartridgeProfile is treated as immutable; do NOT mutate Format in-place.
-        if (TapeCartridgeProfile.Id.LtoDensity != null && TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L7) && typeMCartridge)
+        if (TapeCartridgeProfile.Id.LtoDensity != null &&
+            TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L7) && typeMCartridge)
         {
             _nWraps = 168;
 
@@ -849,6 +861,7 @@ public sealed class CMParser
                     var loss = Math.Max(0, 100 * (1.0 - (setId - lastId) / (double)_setsPerWrap));
                     TapeDirectoryData.CapacityLoss.Add(loss);
                 }
+
                 lastId = setId;
             }
         }
@@ -883,47 +896,69 @@ public sealed class CMParser
         // This is a direct translation of the VB’s “PublishTapeDirectoryPage” for LTO-1/2 and LTO-3+.
         // It fills TapeDirectoryData.WrapEntryInfo[wrapIndex].
         int wrapsInDrive;
-        var hdr = _hdrLen;
+        int hdr;
 
-        if (TapeCartridgeProfile is { Id.LtoDensity: not null } && TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L1))
+        if (TapeCartridgeProfile is { Id.LtoDensity: not null } &&
+            TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L1))
         {
             wrapsInDrive = 48;
             hdr = 16;
             for (var wi = 0; wi < wrapsInDrive; wi++)
             {
-                var evenDs = ReadUInt32BigEndian(page, hdr); hdr += 4;
-                var evenRc = ReadUInt32BigEndian(page, hdr); hdr += 4;
-                var evenFm = ReadUInt32BigEndian(page, hdr); hdr += 4;
-                var evenCrc = ReadUInt32BigEndian(page, hdr); hdr += 4;
+                var evenDs = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
+                var evenRc = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
+                var evenFm = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
+                var evenCrc = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
 
-                var oddDs = ReadUInt32BigEndian(page, hdr); hdr += 4;
-                var oddRc = ReadUInt32BigEndian(page, hdr); hdr += 4;
-                var oddFm = ReadUInt32BigEndian(page, hdr); hdr += 4;
-                var oddCrc = ReadUInt32BigEndian(page, hdr); hdr += 4;
+                var oddDs = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
+                var oddRc = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
+                var oddFm = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
+                var oddCrc = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
 
                 var e = TapeDirectoryData.GetWrapEntry(wi, createNew: true)!;
-                e.Content = $"{evenDs,-12}{evenRc,-12}{evenFm,-12}{evenCrc,-12}{oddDs,-12}{oddRc,-12}{oddFm,-12}{oddCrc,-12}";
-                e.RawData = [(int)evenDs, (int)evenRc, (int)evenFm, (int)evenCrc, (int)oddDs, (int)oddRc, (int)oddFm, (int)oddCrc
+                e.Content =
+                    $"{evenDs,-12}{evenRc,-12}{evenFm,-12}{evenCrc,-12}{oddDs,-12}{oddRc,-12}{oddFm,-12}{oddCrc,-12}";
+                e.RawData =
+                [
+                    (int) evenDs, (int) evenRc, (int) evenFm, (int) evenCrc, (int) oddDs, (int) oddRc, (int) oddFm,
+                    (int) oddCrc
                 ];
                 e.RecCount = (int)(evenRc + oddRc);
                 e.FileMarkCount = (int)(evenFm + oddFm);
             }
+
             return;
         }
 
-        if (TapeCartridgeProfile is { Id.LtoDensity: not null } && TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L2))
+        if (TapeCartridgeProfile is { Id.LtoDensity: not null } &&
+            TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L2))
         {
             wrapsInDrive = 64;
             hdr = 16;
             for (var wi = 0; wi < wrapsInDrive; wi++)
             {
-                var wp = ReadUInt32BigEndian(page, hdr); hdr += 4;
-                var ds = ReadUInt32BigEndian(page, hdr); hdr += 4;
-                var howRc = ReadUInt32BigEndian(page, hdr); hdr += 4;
-                var eowRc = ReadUInt32BigEndian(page, hdr); hdr += 4;
-                var howFm = ReadUInt32BigEndian(page, hdr); hdr += 4;
-                var eowFm = ReadUInt32BigEndian(page, hdr); hdr += 4;
-                var crc = ReadUInt32BigEndian(page, hdr); hdr += 4;
+                var wp = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
+                var ds = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
+                var howRc = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
+                var eowRc = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
+                var howFm = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
+                var eowFm = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
+                var crc = ReadUInt32BigEndian(page, hdr);
+                hdr += 4;
 
                 var e = TapeDirectoryData.GetWrapEntry(wi, createNew: true)!;
                 e.Content = $"{wp,-12}{ds,-12}{howRc,-12}{eowRc,-12}{howFm,-12}{eowFm,-12}{crc,-12}";
@@ -931,6 +966,7 @@ public sealed class CMParser
                 e.RecCount = (int)(howRc + eowRc);
                 e.FileMarkCount = (int)(howFm + eowFm);
             }
+
             return;
         }
 
@@ -940,14 +976,22 @@ public sealed class CMParser
 
         for (var wi = 0; wi < wrapsInDrive; wi++)
         {
-            var wp = ReadUInt32BigEndian(page, hdr); hdr += 4;
-            var ds = ReadUInt32BigEndian(page, hdr); hdr += 4;
-            var howRc = ReadUInt32BigEndian(page, hdr); hdr += 4;
-            var eowRc = ReadUInt32BigEndian(page, hdr); hdr += 4;
-            var howFm = ReadUInt32BigEndian(page, hdr); hdr += 4;
-            var eowFm = ReadUInt32BigEndian(page, hdr); hdr += 4;
-            var fmMap = ReadUInt32BigEndian(page, hdr); hdr += 4;
-            var crc = ReadUInt32BigEndian(page, hdr); hdr += 4;
+            var wp = ReadUInt32BigEndian(page, hdr);
+            hdr += 4;
+            var ds = ReadUInt32BigEndian(page, hdr);
+            hdr += 4;
+            var howRc = ReadUInt32BigEndian(page, hdr);
+            hdr += 4;
+            var eowRc = ReadUInt32BigEndian(page, hdr);
+            hdr += 4;
+            var howFm = ReadUInt32BigEndian(page, hdr);
+            hdr += 4;
+            var eowFm = ReadUInt32BigEndian(page, hdr);
+            hdr += 4;
+            var fmMap = ReadUInt32BigEndian(page, hdr);
+            hdr += 4;
+            var crc = ReadUInt32BigEndian(page, hdr);
+            hdr += 4;
 
             var e = TapeDirectoryData.GetWrapEntry(wi, createNew: true)!;
             e.Content = $"{wp,-12}{ds,-12}{howRc,-12}{eowRc,-12}{howFm,-12}{eowFm,-12}{fmMap,-12}{crc,-12}";
@@ -965,7 +1009,8 @@ public sealed class CMParser
         int slots;
         if (TapeCartridgeProfile != null && !TapeCartridgeProfile.IsLaterThan(LTODensityCode.L5))
             slots = 14;
-        else if (TapeCartridgeProfile is { Id.LtoDensity: not null } && TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L5))
+        else if (TapeCartridgeProfile is { Id.LtoDensity: not null } &&
+                 TapeCartridgeProfile.Id.LtoDensity.Value.Equals(LTODensityCode.L5))
             slots = 22;
         else
             slots = 38; // LTO-6/7/8/9 (VB uses 38)
@@ -1045,6 +1090,790 @@ public sealed class CMParser
             ApplicationVersion: appVersion);
     }
 
+    public string GetModernReport()
+    {
+        const int totalWidth = 80;
+        const int innerWidth = totalWidth - 2;
+        const int labelWidth = 24;
+        const int valueWidth = innerWidth - labelWidth - 5; // " " + label + " │ " + value + " "
+        const int leftSegmentWidth = labelWidth + 2;
+        const int rightSegmentWidth = valueWidth + 2;
+
+        var output = new StringBuilder();
+
+        // ========== BANNER ==========
+        var headerParts = new List<string>();
+        var formatText = NormalizeValue(BuildFormatText());
+        if (formatText != "—") headerParts.Add(formatText);
+        var sn = NormalizeValue(TapeCartridgeProfile?.SN);
+        if (sn != "—") headerParts.Add($"SN {sn}");
+        var vendor = NormalizeValue(TapeCartridgeProfile?.Vendor);
+        if (vendor != "—") headerParts.Add(vendor);
+        var mfgDate = NormalizeValue(FormatDateYmd(TapeCartridgeProfile?.ManufacturingDate));
+        if (mfgDate != "—") headerParts.Add(mfgDate);
+
+        var header = string.Join(" • ", headerParts);
+        if (string.IsNullOrWhiteSpace(header)) header = "CM REPORT";
+
+        output.AppendLine($"┌{new string('─', innerWidth)}┐");
+        if (header.Length > innerWidth - 2)
+        {
+            var lines = SplitToFit(header, innerWidth - 2);
+            foreach (var line in lines)
+                output.AppendLine($"│ {line.PadRight(innerWidth - 2)} │");
+        }
+        else
+        {
+            output.AppendLine($"│ {header.PadRight(innerWidth - 2)} │");
+        }
+        AppendSectionHeader("APPLICATION");
+        var barcode = NormalizeValue(ApplicationSpecificData?.Barcode);
+        if (barcode != "—")
+            AppendRow("Barcode", barcode, highlight: true);
+        var appInfo = NormalizeValue(BuildApplicationInfo());
+        if (appInfo != "—")
+            AppendRow("Application", appInfo);
+
+        AppendSectionHeader("USAGE");
+
+        if (TapeCartridgeProfile is not null && TapeCartridgeProfile.Id.Family == CartridgeFamily.Cleaning)
+        {
+            // Cleaning cartridge
+            var cleansPerformed = StatusData?.ThreadCount.ToString(CultureInfo.InvariantCulture) ?? "—";
+            var cleansRemain = NormalizeValue(ComputeCleansRemaining());
+            var usedLength = NormalizeValue(BuildCleaningUsedLength());
+
+            AppendRow("Cleans performed", cleansPerformed);
+            AppendRow("Cleans remain", cleansRemain);
+            AppendRow("Used length", usedLength);
+        }
+        else
+        {
+            // Data cartridge
+            var loadCount = StatusData?.ThreadCount.ToString(CultureInfo.InvariantCulture) ?? "—";
+            var encrypted = FormatBool(StatusData?.EncryptedData);
+            AppendRow("Load count", loadCount);
+            AppendRow("Encrypted", encrypted);
+
+            // I/O Statistics
+            var writeTotal = NormalizeValue(BuildTotalIoText(isWrite: true));
+            var readTotal = NormalizeValue(BuildTotalIoText(isWrite: false));
+            AppendRow("Total write", writeTotal);
+            AppendRow("Total read", readTotal);
+
+            // FVE
+            var fveText = NormalizeValue(BuildFveText());
+            AppendRow("Full volume eq.", fveText, highlight: true);
+
+            // Error metrics
+            AppendRow("Write retries", FormatWithStatus(GetUsage()?.LifeWriteRetries));
+            AppendRow("Read retries", FormatWithStatus(GetUsage()?.LifeReadRetries));
+            AppendRow("Unrecovered writes", FormatWithStatus(GetUsage()?.LifeUnRecoverWrites));
+            AppendRow("Unrecovered reads", FormatWithStatus(GetUsage()?.LifeUnRecoverReads));
+            AppendRow("Suspended writes", FormatWithStatus(GetUsage()?.LifeSuspendedWrites));
+            AppendRow("Suspended append writes", FormatWithStatus(GetUsage()?.LifeSuspendAppendWrites));
+            AppendRow("Fatal suspended writes", FormatWithStatus(GetUsage()?.LifeFatalSuspendWrites));
+        }
+        AppendSectionHeader("MEDIUM IDENTITY");
+        AppendRow("Format", formatText);
+        AppendRow("Serial number", sn);
+        AppendRow("Tape vendor", vendor);
+        AppendRow("Tape mfg date", mfgDate);
+
+        var mediaVendor = NormalizeValue(MediaMfgData?.MediaVendor);
+        var mediaDate = NormalizeValue(FormatDateYmd(MediaMfgData?.MediaProfileDate));
+        AppendRow("Media vendor", mediaVendor);
+        AppendRow("Media mfg date", mediaDate);
+
+        var particleType = TapeCartridgeProfile?.ParticleType.ToString();
+        if (TapeCartridgeProfile is not null && TapeCartridgeProfile.Id.Family == CartridgeFamily.Cleaning)
+            particleType = "Universal Clean Cartridge";
+        if (string.IsNullOrWhiteSpace(particleType) || particleType == ParticleType.Unknown.ToString())
+            particleType = null;
+
+        var substrateType = TapeCartridgeProfile?.SubstrateType;
+        var substrateText = substrateType == null || substrateType == SubstrateType.Unknown
+            ? null
+            : substrateType.ToString();
+
+        var servoBand = TapeCartridgeProfile?.ServoBandId;
+        var servoText = servoBand == null || servoBand == ServoBandId.Unknown
+            ? null
+            : servoBand.ToString();
+
+        var mediaCodeText = TapeCartridgeProfile == null ? null : $"0x{TapeCartridgeProfile.MediaCode:X4}";
+
+        if (!string.IsNullOrEmpty(particleType))
+            AppendRow("Particle type", particleType);
+        if (!string.IsNullOrEmpty(substrateText))
+            AppendRow("Substrate", substrateText);
+        if (!string.IsNullOrEmpty(servoText))
+            AppendRow("Servo band", servoText);
+        if (!string.IsNullOrEmpty(mediaCodeText))
+            AppendRow("Media code", mediaCodeText);
+        var hasDriveInfo = CartridgeContentData != null || !string.IsNullOrWhiteSpace(GetUsage()?.DriveSN);
+        if (hasDriveInfo)
+        {
+            AppendSectionHeader("DRIVE");
+            var driveSN = NormalizeValue(GetUsage()?.DriveSN);
+            var driveID = NormalizeValue(CartridgeContentData?.DriveId);
+            var driveFW = NormalizeValue(CartridgeContentData?.DriveFirmwareId);
+            var contentCode = FormatHex(CartridgeContentData?.CartridgeContentCode, 4);
+            var partitioned = FormatBool(CartridgeContentData?.PartitionedCartridge);
+            var typeM = FormatBool(CartridgeContentData?.TypeMCartridge);
+
+            if (driveSN != "—")
+                AppendRow("Drive SN", driveSN);
+            if (driveID != "—")
+                AppendRow("Drive ID", driveID);
+            if (driveFW != "—")
+                AppendRow("Drive firmware", driveFW);
+            if (contentCode != null)
+                AppendRow("Content code", contentCode);
+            if (partitioned != "—")
+                AppendRow("Partitioned", partitioned);
+            if (typeM != "—")
+                AppendRow("Type M", typeM);
+        }
+
+        AppendSectionHeader("DATA ON TAPE");
+
+        if (TapeCartridgeProfile is null || TapeCartridgeProfile.Id.Family == CartridgeFamily.Cleaning)
+        {
+            AppendRow("Data on tape", "Not applicable");
+        }
+        else
+        {
+            var kbPerDataset = GetKbPerDataset();
+            var wrapsText = _nWraps > 0 ? _nWraps.ToString(CultureInfo.InvariantCulture) : "—";
+            var setsPerWrapText = _setsPerWrap > 0 ? _setsPerWrap.ToString(CultureInfo.InvariantCulture) : "—";
+            var kbText = kbPerDataset > 0 ? kbPerDataset.ToString(CultureInfo.InvariantCulture) : "—";
+            var tapeDirVer = TapeDirectoryData.Version > 0
+                ? TapeDirectoryData.Version.ToString(CultureInfo.InvariantCulture)
+                : "—";
+
+            AppendRow("Wraps", wrapsText);
+            AppendRow("Sets/wrap", setsPerWrapText);
+            AppendRow("KB/dataset", kbText);
+            AppendRow("Tape dir ver", tapeDirVer);
+
+            if (TapeDirectoryData.CapacityLoss.Count == 0)
+            {
+                AppendRow("Partitions", "Not available");
+            }
+            else
+            {
+                try
+                {
+                    var dataWrapList = new List<int>();
+                    var dataWrapNum = 0;
+                    foreach (var loss in TapeDirectoryData.CapacityLoss)
+                    {
+                        if (loss is -3)
+                        {
+                            if (dataWrapNum <= 0) continue;
+                            dataWrapList.Add(dataWrapNum);
+                            dataWrapNum = 0;
+                        }
+                        else
+                        {
+                            dataWrapNum += 1;
+                        }
+                    }
+
+                    if (dataWrapNum > 0)
+                        dataWrapList.Add(dataWrapNum);
+
+                    long nLossDatasets = 0;
+                    var dataSizes = new List<long>();
+                    long currSize = 0;
+                    var guardWrap = false;
+
+                    var wrapsToRead = _nWraps;
+                    if (wrapsToRead > TapeDirectoryData.CapacityLoss.Count)
+                        wrapsToRead = TapeDirectoryData.CapacityLoss.Count;
+
+                    for (var wi = 0; wi < wrapsToRead; wi++)
+                    {
+                        var loss = GetCapacityLoss(wi);
+                        var datasetEntry = TapeDirectoryData.GetDatasetsOnWrap(wi, createNew: false);
+                        if (datasetEntry == null)
+                            break;
+
+                        if (loss >= 0 && _setsPerWrap > 0)
+                            nLossDatasets += Math.Max(0, _setsPerWrap - datasetEntry.Data);
+
+                        switch (loss)
+                        {
+                            case >= 0:
+                                currSize += datasetEntry.Data;
+                                break;
+                            case -2:
+                                currSize += datasetEntry.Data;
+                                break;
+                            case -3:
+                                if (guardWrap)
+                                {
+                                    dataSizes.Add(currSize);
+                                    currSize = 0;
+                                    guardWrap = false;
+                                }
+                                else
+                                {
+                                    guardWrap = true;
+                                }
+                                break;
+                        }
+                    }
+
+                    dataSizes.Add(currSize);
+
+                    var estLoss = FormatSizeBytes((nLossDatasets * GetKbPerDataset() * 1000L).Bytes());
+                    AppendRow("Total partitions", dataWrapList.Count.ToString(CultureInfo.InvariantCulture));
+
+                    var sizePerWrap = GetMbPerWrap();
+                    for (var i = 0; i < dataWrapList.Count; i++)
+                    {
+                        var wraps = dataWrapList[i];
+                        var totalSize = (sizePerWrap.Megabytes * wraps).Megabytes();
+                        var writtenSize = "";
+                        if (dataSizes.Count == dataWrapList.Count && sizePerWrap.Bytes > 0)
+                        {
+                            var bytes = (dataSizes[i] * GetKbPerDataset()).Kilobytes();
+                            writtenSize = $"{FormatSizeBytes(bytes)} / ";
+                        }
+
+                        var sizeText = $"{writtenSize}{FormatSizeBytes(totalSize)} · {wraps} wraps";
+                        AppendRow($"Partition {i} size", sizeText);
+                    }
+
+                    AppendRow("Est. capacity loss", estLoss, highlight: true);
+                }
+                catch
+                {
+                    AppendRow("Partitions", "Not available");
+                }
+            }
+        }
+        AppendSectionHeader("CM DATA");
+        AppendRow("Length", _cm.Length.ToString(CultureInfo.InvariantCulture));
+        AppendRow("Pages", PageData.Count.ToString(CultureInfo.InvariantCulture));
+
+        AppendBottomBorder();
+        return output.ToString();
+
+        void AppendSectionHeader(string title)
+        {
+            var left = BuildSectionSegment(title, leftSegmentWidth);
+            var right = new string('─', rightSegmentWidth);
+            output.AppendLine($"├{left}┼{right}┤");
+        }
+
+        void AppendRow(string label, string? value, bool highlight = false)
+        {
+            var labelText = NormalizeLabel(label);
+            var valueText = NormalizeValue(value);
+            var valueCell = highlight
+                ? BuildHighlightedValue(valueText, valueWidth)
+                : FitRight(valueText, valueWidth);
+            output.AppendLine($"│ {FitLeft(labelText, labelWidth)} │ {valueCell} │");
+        }
+
+        void AppendBottomBorder()
+            => output.AppendLine($"└{new string('─', leftSegmentWidth)}┴{new string('─', rightSegmentWidth)}┘");
+
+        static string NormalizeValue(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return "—";
+            if (string.Equals(value, "Not available", StringComparison.OrdinalIgnoreCase)) return "—";
+            return value.Trim();
+        }
+
+        static string? FormatDateYmd(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            var trimmed = value.Trim();
+            if (trimmed.Length != 8) return trimmed;
+            for (var i = 0; i < trimmed.Length; i++)
+            {
+                if (!char.IsDigit(trimmed[i]))
+                    return trimmed;
+            }
+
+            return $"{trimmed[..4]}-{trimmed[4..6]}-{trimmed[6..8]}";
+        }
+
+        static string NormalizeLabel(string label)
+        {
+            if (string.IsNullOrWhiteSpace(label)) return string.Empty;
+            var text = label.Trim();
+            if (text.EndsWith(":", StringComparison.Ordinal))
+                text = text[..^1].TrimEnd();
+            return text;
+        }
+
+        static string BuildSectionSegment(string title, int width)
+        {
+            if (width <= 0) return string.Empty;
+            var label = string.IsNullOrWhiteSpace(title) ? string.Empty : title.Trim();
+            if (string.IsNullOrEmpty(label)) return new string('─', width);
+            var prefix = $"─ {label} ";
+            if (prefix.Length >= width) return prefix[..width];
+            return prefix + new string('─', width - prefix.Length);
+        }
+
+        static string FitLeft(string text, int width)
+        {
+            if (width <= 0) return string.Empty;
+            if (text.Length <= width) return text.PadRight(width);
+            if (width == 1) return "…";
+            return text[..(width - 1)] + "…";
+        }
+
+        static string FitRight(string text, int width)
+        {
+            if (width <= 0) return string.Empty;
+            if (text.Length <= width) return text.PadLeft(width);
+            if (width == 1) return "…";
+            var trimmed = text[..(width - 1)] + "…";
+            return trimmed.PadLeft(width);
+        }
+
+        static string BuildHighlightedValue(string value, int width)
+        {
+            const string marker = "★ ";
+            if (width <= 0) return string.Empty;
+            if (width <= marker.Length)
+                return FitLeft(marker.TrimEnd(), width);
+
+            var available = width - marker.Length;
+            return marker + FitRight(value, available);
+        }
+
+        static string FormatBool(bool? value)
+            => value.HasValue ? (value.Value ? "Yes" : "No") : "—";
+
+        static string? FormatHex(int? value, int digits)
+            => value.HasValue ? $"0x{value.Value.ToString($"X{digits}", CultureInfo.InvariantCulture)}" : null;
+
+        static string FormatWithStatus(long? value)
+        {
+            if (!value.HasValue) return "—";
+            var numStr = value.Value.ToString(CultureInfo.InvariantCulture);
+            return value.Value == 0 ? $"{numStr} ✓" : numStr;
+        }
+
+        static List<string> SplitToFit(string text, int maxWidth)
+        {
+            var result = new List<string>();
+            var words = text.Split(' ');
+            var currentLine = "";
+
+            foreach (var word in words)
+            {
+                var testLine = string.IsNullOrEmpty(currentLine) ? word : $"{currentLine} {word}";
+                if (testLine.Length <= maxWidth)
+                {
+                    currentLine = testLine;
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(currentLine))
+                        result.Add(currentLine);
+                    currentLine = word;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(currentLine))
+                result.Add(currentLine);
+
+            return result;
+        }
+    }
+
+    public string GetLegacyReport()
+    {
+        var output = new StringBuilder();
+
+        AppendHeader(output, "APPLICATION INFO");
+        AppendRowSafe(output, "Barcode:", () => ApplicationSpecificData?.Barcode);
+        AppendRowSafe(output, "Application:", BuildApplicationInfo);
+
+        AppendHeader(output, "MEDIUM USAGE");
+
+        if (TapeCartridgeProfile is not null && TapeCartridgeProfile.Id.Family == CartridgeFamily.Cleaning)
+        {
+            AppendRowSafe(output, "Cleans performed:",
+                () => StatusData?.ThreadCount.ToString(CultureInfo.InvariantCulture));
+            AppendRowSafe(output, "Cleans remain:", ComputeCleansRemaining);
+            AppendRowSafe(output, "Used length:", BuildCleaningUsedLength);
+        }
+        else
+        {
+            AppendRowSafe(output, "Load count:", () => StatusData?.ThreadCount.ToString(CultureInfo.InvariantCulture));
+            AppendRowSafe(output, "Total write:", () => BuildTotalIoText(isWrite: true));
+            AppendRowSafe(output, "Total read:", () => BuildTotalIoText(isWrite: false));
+            AppendRowSafe(output, "Full volume equivalents:", BuildFveText);
+            AppendRowSafe(output, "Write retries:",
+                () => GetUsage()?.LifeWriteRetries.ToString(CultureInfo.InvariantCulture));
+            AppendRowSafe(output, "Read retries:",
+                () => GetUsage()?.LifeReadRetries.ToString(CultureInfo.InvariantCulture));
+            AppendRowSafe(output, "Unrecovered writes:",
+                () => GetUsage()?.LifeUnRecoverWrites.ToString(CultureInfo.InvariantCulture));
+            AppendRowSafe(output, "Unrecovered reads:",
+                () => GetUsage()?.LifeUnRecoverReads.ToString(CultureInfo.InvariantCulture));
+            AppendRowSafe(output, "Suspended writes:",
+                () => GetUsage()?.LifeSuspendedWrites.ToString(CultureInfo.InvariantCulture));
+            AppendRowSafe(output, "Suspended append writes:",
+                () => GetUsage()?.LifeSuspendAppendWrites.ToString(CultureInfo.InvariantCulture));
+            AppendRowSafe(output, "Fatal suspended writes:",
+                () => GetUsage()?.LifeFatalSuspendWrites.ToString(CultureInfo.InvariantCulture));
+        }
+
+        AppendHeader(output, "MEDIUM IDENTITY");
+        AppendRowSafe(output, "Format:", BuildFormatText);
+        AppendRowSafe(output, "Serial number:", () => TapeCartridgeProfile?.SN);
+        AppendRowSafe(output, "Tape Vendor:", () => TapeCartridgeProfile?.Vendor);
+        AppendRowSafe(output, "Tape mfg date:", () => TapeCartridgeProfile?.ManufacturingDate);
+        AppendRowSafe(output, "Media Vendor:", () => MediaMfgData?.MediaVendor);
+        AppendRowSafe(output, "Media mfg date:", () => MediaMfgData?.MediaProfileDate);
+
+        try
+        {
+            var cmData = _cm.Span;
+            var particleType = TapeCartridgeProfile?.ParticleType.ToString() ?? "";
+            if (TapeCartridgeProfile is not null && TapeCartridgeProfile.Id.Family == CartridgeFamily.Cleaning)
+                particleType = "Universal Clean Cartridge";
+            if (string.IsNullOrWhiteSpace(particleType))
+                particleType = "Not available";
+
+            output.AppendLine(FormatRow("Particle type:", particleType));
+
+            AppendHeader(output, "DATA ON TAPE");
+
+            var wares = new StringBuilder();
+            long nLossDatasets = 0;
+            var dataSize = new List<long>();
+
+            try
+            {
+                var skipWrapAnalysis = TapeCartridgeProfile is not null
+                                       && TapeCartridgeProfile.Id.Family == CartridgeFamily.Cleaning;
+                if (!skipWrapAnalysis)
+                {
+                    wares.AppendLine(BuildHeader("WRAP ANALYSIS"));
+                    wares.AppendLine("| Wrap | Start Block |  End Block  | Filemark |      Set      | Capacity  |");
+                    wares.AppendLine("|------+-------------+-------------+----------+---------------+-----------|");
+
+                    var startBlock = 0;
+                    long currSize = 0;
+                    var guardWrap = false;
+
+                    var wrapsToRead = _nWraps;
+                    for (var wn = 0; wn < wrapsToRead; wn++)
+                    {
+                        var capacityLoss = GetCapacityLoss(wn);
+                        var wrapEntry = TapeDirectoryData.GetWrapEntry(wn, createNew: false);
+                        var datasetEntry = TapeDirectoryData.GetDatasetsOnWrap(wn, createNew: false);
+
+                        if (wrapEntry is null || datasetEntry is null)
+                            throw new InvalidOperationException("Wrap data missing");
+
+                        var startBlockStr = startBlock.ToString(CultureInfo.InvariantCulture);
+                        if (capacityLoss is -1 or -3)
+                            startBlockStr = "";
+
+                        var endBlock = startBlock + wrapEntry.RecCount + wrapEntry.FileMarkCount - 1;
+                        if (capacityLoss is -2)
+                            endBlock += 1;
+
+                        wares.Append($"| {wn.ToString(CultureInfo.InvariantCulture).PadLeft(3)}  |");
+                        wares.Append($" {startBlockStr.PadLeft(10)}  |");
+                        if (startBlockStr.Length > 0)
+                            wares.Append($"  {endBlock.ToString(CultureInfo.InvariantCulture).PadLeft(10)} |");
+                        else
+                            wares.Append($"  {"".PadLeft(10)} |");
+                        wares.Append(
+                            $"  {wrapEntry.FileMarkCount.ToString(CultureInfo.InvariantCulture).PadLeft(5)}   |");
+                        wares.Append(
+                            $" {datasetEntry.Data.ToString(CultureInfo.InvariantCulture).PadLeft(5)} / {_setsPerWrap.ToString(CultureInfo.InvariantCulture).PadRight(5)} |");
+
+                        startBlock += wrapEntry.RecCount + wrapEntry.FileMarkCount;
+
+                        switch (capacityLoss)
+                        {
+                            case >= 0 when _setsPerWrap > 0:
+                                {
+                                    nLossDatasets += Math.Max(0, _setsPerWrap - datasetEntry.Data);
+                                    currSize += datasetEntry.Data;
+                                    var pct = datasetEntry.Data / (double)_setsPerWrap * 100.0;
+                                    wares.Append($" {pct.ToString("f2", CultureInfo.InvariantCulture).PadLeft(7)}%  |");
+                                    break;
+                                }
+                            case >= 0:
+                                wares.Append("       0%  |");
+                                break;
+                            case -1:
+                                startBlock = 0;
+                                wares.Append("           |");
+                                break;
+                            case -2:
+                                currSize += datasetEntry.Data;
+                                wares.Append("  >>EOD<<  |");
+                                break;
+                            case -3:
+                                {
+                                    startBlock = 0;
+                                    if (guardWrap)
+                                    {
+                                        dataSize.Add(currSize);
+                                        currSize = 0;
+                                        guardWrap = false;
+                                    }
+                                    else
+                                    {
+                                        guardWrap = true;
+                                    }
+
+                                    wares.Append("  *GUARD*  |");
+                                    break;
+                                }
+                        }
+
+                        wares.AppendLine();
+                    }
+
+                    dataSize.Add(currSize);
+                }
+            }
+            catch
+            {
+                wares.Append("| CM data parsing failed.".PadRight(74)).Append('|').AppendLine();
+            }
+
+            try
+            {
+                var dataWrapList = new List<int>();
+                var dataWrapNum = 0;
+                foreach (var loss in TapeDirectoryData.CapacityLoss)
+                {
+                    if (loss is -3)
+                    {
+                        if (dataWrapNum <= 0) continue;
+                        dataWrapList.Add(dataWrapNum);
+                        dataWrapNum = 0;
+                    }
+                    else
+                    {
+                        dataWrapNum += 1;
+                    }
+                }
+
+                if (dataWrapNum > 0)
+                    dataWrapList.Add(dataWrapNum);
+
+                output.AppendLine(FormatRow("Total partitions:",
+                    dataWrapList.Count.ToString(CultureInfo.InvariantCulture)));
+
+                for (var i = 0; i < dataWrapList.Count; i++)
+                {
+                    var wraps = dataWrapList[i];
+                    var sizePerWrap = GetMbPerWrap();
+                    var len = (sizePerWrap.Megabytes * wraps).Megabytes();
+
+                    var writtenSize = "";
+                    if (dataSize.Count == dataWrapList.Count && sizePerWrap.Bytes > 0)
+                    {
+                        var bytes = (dataSize[i] * GetKbPerDataset()).Kilobytes();
+                        writtenSize = $"{FormatSizeBytes(bytes)} / ";
+                    }
+
+                    var sizeText = (writtenSize + FormatSizeBytes(len)).PadRight(24);
+                    var wrapText = $"[{wraps.ToString(CultureInfo.InvariantCulture),3} wraps]";
+                    output.AppendLine(FormatRow($"Partition {i} size:", sizeText + wrapText));
+                }
+            }
+            catch
+            {
+                output.AppendLine("Partition page not available");
+            }
+
+            output.AppendLine(FormatRow("Estimated capacity loss:",
+                FormatSizeBytes((nLossDatasets * GetKbPerDataset() * 1000L).Bytes())));
+            output.Append(wares.ToString());
+
+            AppendHeader(output, "CM RAW DATA");
+            output.AppendLine(FormatRow("Length:", cmData.Length.ToString(CultureInfo.InvariantCulture)));
+            output.Append(HexDump.Format(cmData));
+            output.AppendLine(BuildHeader(string.Empty));
+            output.AppendLine();
+        }
+        catch (Exception ex)
+        {
+            output.Append("| CM data parsing failed.".PadRight(74)).Append('|').AppendLine();
+            output.AppendLine(ex.ToString());
+        }
+
+        return output.ToString();
+    }
+
+    private static void AppendHeader(StringBuilder sb, string title)
+        => sb.AppendLine(BuildHeader(title));
+
+    private static string BuildHeader(string title)
+    {
+        const int innerWidth = 73;
+        var content = string.IsNullOrEmpty(title) ? string.Empty : $" {title} ";
+        if (content.Length > innerWidth)
+            content = content[..innerWidth];
+        var leftPad = (innerWidth - content.Length) / 2;
+        var rightPad = innerWidth - content.Length - leftPad;
+        return "+" + new string('=', leftPad) + content + new string('=', rightPad) + "+";
+    }
+
+    private static string FormatRow(string label, string value)
+    {
+        var prefix = $"| {label} ".PadRight(28);
+        return (prefix + value).PadRight(74) + "|";
+    }
+
+    private static void AppendRowSafe(StringBuilder sb, string label, Func<string?> getValue)
+    {
+        try
+        {
+            var value = getValue();
+            if (string.IsNullOrWhiteSpace(value))
+                value = "Not available";
+            sb.AppendLine(FormatRow(label, value));
+        }
+        catch
+        {
+            sb.AppendLine(FormatRow(label, "Not available"));
+        }
+    }
+
+    private Usage? GetUsage()
+        => UsageData.Count > 0 ? UsageData[0] : null;
+
+    private string? BuildApplicationInfo()
+    {
+        if (ApplicationSpecificData is null)
+            return null;
+
+        var vendor = ApplicationSpecificData.Value.ApplicationVendor;
+        var name = ApplicationSpecificData.Value.ApplicationName;
+        var version = ApplicationSpecificData.Value.ApplicationVersion;
+        var appInfo = $"{vendor} {name} {version}".Trim();
+        return string.IsNullOrWhiteSpace(appInfo) ? null : appInfo;
+    }
+
+    private string? BuildFormatText()
+    {
+        if (TapeCartridgeProfile is null)
+            return null;
+
+        var format = TapeCartridgeProfile.Format ?? "";
+        var mediaCode = TapeCartridgeProfile.MediaCode;
+        var densityCode = TapeCartridgeProfile.Id.LtoDensity?.Code ?? 0;
+        var suffix = $"(MC 0x{mediaCode:X4} DC 0x{densityCode:X2})";
+        var value = string.IsNullOrWhiteSpace(format) ? suffix : $"{format} {suffix}";
+        return value.Trim();
+    }
+
+    private string BuildTotalIoText(bool isWrite)
+    {
+        var usage = GetUsage();
+        if (usage is null)
+            return "Not available";
+
+        var kbPerDataset = GetKbPerDataset();
+        var sets = isWrite ? usage.LifeSetsWritten : usage.LifeSetsRead;
+
+        if (kbPerDataset > 0)
+        {
+            var size = (kbPerDataset * sets).Kilobytes();
+            return FormatSizeBytes(size);
+        }
+
+        return $"{sets.ToString(CultureInfo.InvariantCulture)} Sets";
+    }
+
+    private string BuildFveText()
+    {
+        var usage = GetUsage();
+        if (usage is null)
+            return "Not available";
+
+        if (_setsPerWrap <= 0 || _nWraps <= 0)
+            return "Unknown";
+
+        var denom = _setsPerWrap * (double)_nWraps;
+        var fve = (usage.LifeSetsRead + usage.LifeSetsWritten) / denom;
+
+        if (TapeCartridgeProfile is null || TapeCartridgeProfile.TapeLifeInVols <= 0)
+            return $"{fve.ToString("f2", CultureInfo.InvariantCulture)} FVE";
+
+        var pct = fve / TapeCartridgeProfile.TapeLifeInVols * 100.0;
+        return
+            $"{fve.ToString("f2", CultureInfo.InvariantCulture)} FVE ({pct.ToString("f2", CultureInfo.InvariantCulture)}%)";
+    }
+
+    private string? ComputeCleansRemaining()
+    {
+        if (TapeCartridgeProfile is null || StatusData is null)
+            return null;
+
+        if (TapeCartridgeProfile.TapeLengthQuarterMetres <= 0)
+            return null;
+
+        var cleanLength = 5.5;
+        var tapeLen = TapeCartridgeProfile.TapeLengthQuarterMetres / 4.0;
+        var lastLoc = StatusData.Value.LastLocation / 4.0;
+        var remaining = (tapeLen - 11 - lastLoc) / cleanLength;
+        if (remaining < 0)
+            remaining = 0;
+        return remaining.ToString("f2", CultureInfo.InvariantCulture);
+    }
+
+    private string? BuildCleaningUsedLength()
+    {
+        if (TapeCartridgeProfile is null || StatusData is null)
+            return null;
+
+        var tapeLen = TapeCartridgeProfile.TapeLengthQuarterMetres / 4.0;
+        var lastLoc = StatusData.Value.LastLocation / 4.0;
+        var usable = tapeLen - 11;
+        if (usable < 0)
+            usable = 0;
+        return
+            $"{lastLoc.ToString("f2", CultureInfo.InvariantCulture)} m / {usable.ToString("f2", CultureInfo.InvariantCulture)} m";
+    }
+
+    private long GetKbPerDataset()
+        => TapeCartridgeProfile?.KbPerDataset ?? 0L;
+
+    private ByteSize GetMbPerWrap()
+    {
+        var kbPerDataset = GetKbPerDataset();
+        if (kbPerDataset <= 0 || _setsPerWrap <= 0)
+            return ByteSize.FromBytes(0);
+
+        var kbPerWrap = kbPerDataset * _setsPerWrap;
+        return ByteSize.FromKilobytes(kbPerWrap);
+    }
+
+    private double GetCapacityLoss(int index)
+    {
+        if (index < 0 || index >= TapeDirectoryData.CapacityLoss.Count)
+            return 0;
+        return TapeDirectoryData.CapacityLoss[index];
+    }
+
+    private static string FormatSizeBytes(ByteSize size)
+    {
+        return size.ToString("#.##");
+    }
+
     private static ushort ReadUInt16BigEndian(ReadOnlySpan<byte> s, int offset)
         => BinaryPrimitives.ReadUInt16BigEndian(s.Slice(offset, 2));
 
@@ -1066,8 +1895,7 @@ public sealed class CMParser
     private static string GetAsciiTrim(ReadOnlySpan<byte> s, int offset, int length)
     {
         if (offset < 0 || length <= 0) return "";
-        if (offset + length > s.Length) return "";
-        return Encoding.ASCII.GetString(s.Slice(offset, length)).TrimEnd('\0').TrimEnd();
+        return offset + length > s.Length ? "" : Encoding.ASCII.GetString(s.Slice(offset, length)).TrimEnd('\0').TrimEnd();
     }
 
     private readonly record struct UsageSnapshot(

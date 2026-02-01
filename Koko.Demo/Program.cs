@@ -6,7 +6,10 @@ using Koko.Demo;
 using Serilog;
 
 using System.Diagnostics;
+using System.Text;
+
 var startStamp = DateTimeOffset.Now.ToString("yyyyMMdd-HHmmss");
+Console.OutputEncoding = Encoding.UTF8;
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Verbose()
     .Enrich.FromLogContext()
@@ -28,13 +31,13 @@ Log.Logger = new LoggerConfiguration()
 //}
 
 //lto.GetInquiry();
-var data = File.ReadAllBytes("R:/test2.cm");
+var data = File.ReadAllBytes("R:/cm.bin");
 var sw = new Stopwatch();
 sw.Start();
 var cm = CMParser.CreateFromSpan(data);
 sw.Stop();
 Log.Information("{@time}", sw.Elapsed);
-Log.Information("{@cm}", cm);
+Console.WriteLine(cm.GetModernReport());
 
 Console.ReadLine();
 //BenchmarkRunner.Run<CmBench>();
