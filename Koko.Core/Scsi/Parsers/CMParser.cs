@@ -1247,7 +1247,7 @@ public sealed class CMParser
             var kbPerDataset = GetKbPerDataset();
             var wrapsText = _nWraps > 0 ? _nWraps.ToString(CultureInfo.InvariantCulture) : "—";
             var setsPerWrapText = _setsPerWrap > 0 ? _setsPerWrap.ToString(CultureInfo.InvariantCulture) : "—";
-            var kbText = kbPerDataset > 0 ? kbPerDataset.ToString(CultureInfo.InvariantCulture) : "—";
+            var kbText = kbPerDataset.Bytes > 0 ? kbPerDataset.ToString(CultureInfo.InvariantCulture) : "—";
             var tapeDirVer = TapeDirectoryData.Version > 0
                 ? TapeDirectoryData.Version.ToString(CultureInfo.InvariantCulture)
                 : "—";
@@ -1328,7 +1328,7 @@ public sealed class CMParser
 
                     dataSizes.Add(currSize);
 
-                    var estLoss = FormatSizeBytes((nLossDatasets * GetKbPerDataset() * 1000L).Bytes());
+                    var estLoss = FormatSizeBytes((nLossDatasets * GetKbPerDataset().Kilobytes * 1000L).Bytes());
                     AppendRow("Total partitions", dataWrapList.Count.ToString(CultureInfo.InvariantCulture));
 
                     var sizePerWrap = GetMbPerWrap();
@@ -1339,7 +1339,7 @@ public sealed class CMParser
                         var writtenSize = "";
                         if (dataSizes.Count == dataWrapList.Count && sizePerWrap.Bytes > 0)
                         {
-                            var bytes = (dataSizes[i] * GetKbPerDataset()).Kilobytes();
+                            var bytes = (dataSizes[i] * GetKbPerDataset().Kilobytes).Kilobytes();
                             writtenSize = $"{FormatSizeBytes(bytes)} / ";
                         }
 
@@ -1684,7 +1684,7 @@ public sealed class CMParser
                     var writtenSize = "";
                     if (dataSize.Count == dataWrapList.Count && sizePerWrap.Bytes > 0)
                     {
-                        var bytes = (dataSize[i] * GetKbPerDataset()).Kilobytes();
+                        var bytes = (dataSize[i] * GetKbPerDataset().Kilobytes).Kilobytes();
                         writtenSize = $"{FormatSizeBytes(bytes)} / ";
                     }
 
@@ -1699,7 +1699,7 @@ public sealed class CMParser
             }
 
             output.AppendLine(FormatRow("Estimated capacity loss:",
-                FormatSizeBytes((nLossDatasets * GetKbPerDataset() * 1000L).Bytes())));
+                FormatSizeBytes((nLossDatasets * GetKbPerDataset().Kilobytes * 1000L).Bytes())));
             output.Append(wares.ToString());
 
             AppendHeader(output, "CM RAW DATA");
@@ -1789,9 +1789,9 @@ public sealed class CMParser
         var kbPerDataset = GetKbPerDataset();
         var sets = isWrite ? usage.LifeSetsWritten : usage.LifeSetsRead;
 
-        if (kbPerDataset > 0)
+        if (kbPerDataset.Bytes > 0)
         {
-            var size = (kbPerDataset * sets).Kilobytes();
+            var size = (kbPerDataset.Kilobytes * sets).Kilobytes();
             return FormatSizeBytes(size);
         }
 
@@ -1849,16 +1849,18 @@ public sealed class CMParser
             $"{lastLoc.ToString("f2", CultureInfo.InvariantCulture)} m / {usable.ToString("f2", CultureInfo.InvariantCulture)} m";
     }
 
-    private long GetKbPerDataset()
-        => TapeCartridgeProfile?.KbPerDataset ?? 0L;
+    private ByteSize GetKbPerDataset()
+    {
+        return (TapeCartridgeProfile?.KbPerDataset * 1000L)?.Bytes() ?? 0L.Bytes();
+    }
 
     private ByteSize GetMbPerWrap()
     {
         var kbPerDataset = GetKbPerDataset();
-        if (kbPerDataset <= 0 || _setsPerWrap <= 0)
+        if (kbPerDataset.Bytes <= 0 || _setsPerWrap <= 0)
             return ByteSize.FromBytes(0);
 
-        var kbPerWrap = kbPerDataset * _setsPerWrap;
+        var kbPerWrap = kbPerDataset.Kilobytes * _setsPerWrap;
         return ByteSize.FromKilobytes(kbPerWrap);
     }
 
