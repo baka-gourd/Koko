@@ -1,7 +1,8 @@
 using Microsoft.Win32.SafeHandles;
 
-using System.Buffers;
 using System.Text;
+
+using Koko.Core.Scsi.Commands;
 
 using Windows.Win32;
 using Windows.Win32.Foundation;
@@ -13,6 +14,9 @@ namespace Koko.Core.Scsi;
 
 public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
 {
+    // Cannot use Lock, because inaccessible
+    private readonly object _scsiGate = new();
+
     public string Vendor { get; private set; } = "";
     public string Product { get; private set; } = "";
     public string SerialNumber { get; private set; } = "";
@@ -44,15 +48,18 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
         out uint bytesReturned,
         Span<byte> senseBuffer)
     {
-        return IOControl.IOCtlDirect(
-            handle,
-            commandBlock,
-            returnBuffer,
-            DataDirection.In,
-            senseBuffer,
-            timeoutSeconds,
-            out scsiStatus,
-            out bytesReturned);
+        lock (_scsiGate)
+        {
+            return IOControl.IOCtlDirect(
+                handle,
+                commandBlock,
+                returnBuffer,
+                DataDirection.In,
+                senseBuffer,
+                timeoutSeconds,
+                out scsiStatus,
+                out bytesReturned);
+        }
     }
 
     public override bool ScsiCommand(ReadOnlySpan<byte> commandBlock,
@@ -62,15 +69,18 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
         out uint bytesReturned,
         Span<byte> senseBuffer)
     {
-        return IOControl.IOCtlDirect(
-            handle,
-            commandBlock,
-            [],
-            dataDirection,
-            senseBuffer,
-            timeout,
-            out scsiStatus,
-            out bytesReturned);
+        lock (_scsiGate)
+        {
+            return IOControl.IOCtlDirect(
+                handle,
+                commandBlock,
+                [],
+                dataDirection,
+                senseBuffer,
+                timeout,
+                out scsiStatus,
+                out bytesReturned);
+        }
     }
 
     public override bool ScsiWrite(
@@ -81,38 +91,35 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
         out uint bytesReturned,
         Span<byte> senseBuffer)
     {
-        return IOControl.IOCtlDirect(
-            handle,
-            commandBlock,
-            dataBuffer,
-            DataDirection.Out,
-            senseBuffer,
-            timeoutSeconds,
-            out scsiStatus,
-            out bytesReturned);
+        lock (_scsiGate)
+        {
+            return IOControl.IOCtlDirect(
+                handle,
+                commandBlock,
+                dataBuffer,
+                DataDirection.Out,
+                senseBuffer,
+                timeoutSeconds,
+                out scsiStatus,
+                out bytesReturned);
+        }
     }
 
     public bool GetInquiry(uint timeoutSeconds = 10)
     {
         using (Log.PushMethod())
         {
-            Span<byte> sense = stackalloc byte[IOControl.DefaultSenseLength];
-
             // 1) VPD page 0x80 header: 4 bytes
-            // INQUIRY(6): [0]=0x12, [1]=EVPD(1)/CmdDt(0), [2]=PageCode, [3]=Reserved, [4]=AllocLen, [5]=Control
-            Span<byte> vpdHdr = stackalloc byte[4];
-            if (!TryScsiRead(
-                    commandBlock: [0x12, 0x01, 0x80, 0x00, 0x04, 0x00],
-                    returnBuffer: vpdHdr,
-                    timeoutSeconds: timeoutSeconds,
-                    senseBuffer: sense,
-                    out var scsiStatus,
-                    out var bytesReturned))
-            {
-                return false;
-            }
+            var headerRequest = new InquiryCommand(
+                EnableVitalProductData: true,
+                PageCode: 0x80,
+                AllocationLength: 4,
+                TimeoutSeconds: timeoutSeconds);
 
-            if (bytesReturned < 4)
+            if (!InquiryCommand.TryExecute(this, headerRequest, out _, out var vpdHdr))
+                return false;
+
+            if (vpdHdr.Length < 4)
                 return false;
 
             int pageLen = vpdHdr[3];
@@ -123,67 +130,45 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
                 return false;
 
             // 2) 读完整 VPD 0x80
-            byte[]? rented = null;
-            var vpdPage = totalLen <= 256
-                ? stackalloc byte[256]
-                : (rented = ArrayPool<byte>.Shared.Rent(totalLen));
+            var pageRequest = new InquiryCommand(
+                EnableVitalProductData: true,
+                PageCode: 0x80,
+                AllocationLength: (ushort)totalLen,
+                TimeoutSeconds: timeoutSeconds);
 
-            try
-            {
-                var vpdSlice = vpdPage[..totalLen];
+            if (!InquiryCommand.TryExecute(this, pageRequest, out _, out var vpdPage))
+                return false;
 
-                if (!TryScsiRead(
-                        commandBlock: [0x12, 0x01, 0x80, 0x00, (byte)(totalLen & 0xFF), 0x00],
-                        returnBuffer: vpdSlice,
-                        timeoutSeconds: timeoutSeconds,
-                        senseBuffer: sense,
-                        out scsiStatus,
-                        out bytesReturned))
-                {
-                    return false;
-                }
+            // 有些设备会返回少于申请长度的数据；但至少应包含 header + pageLen
+            if (vpdPage.Length < 4)
+                return false;
 
-                // 有些设备会返回少于申请长度的数据；但至少应包含 header + pageLen
-                if (bytesReturned < 4)
-                    return false;
+            // 以实际返回长度为准，避免越界；同时保证 offset=4 之后才是字符串
+            int available = vpdPage.Length;
+            if (available <= 4)
+                return false;
 
-                // 以实际返回长度为准，避免越界；同时保证 offset=4 之后才是字符串
-                int available = (int)bytesReturned;
-                if (available <= 4)
-                    return false;
+            int revisionLen = Math.Min(pageLen, available - 4);
+            SerialNumber = Encoding.ASCII.GetString(vpdPage.AsSpan(4, revisionLen)).Trim();
 
-                int revisionLen = Math.Min(pageLen, available - 4);
-                SerialNumber = Encoding.ASCII.GetString(vpdSlice.Slice(4, revisionLen)).Trim();
+            // 3) 标准 INQUIRY（EVPD=0），读 0x60
+            var stdRequest = new InquiryCommand(
+                EnableVitalProductData: false,
+                PageCode: 0x00,
+                AllocationLength: 0x60,
+                TimeoutSeconds: timeoutSeconds);
 
-                // 3) 标准 INQUIRY（EVPD=0），读 0x60
-                Span<byte> std = stackalloc byte[0x60];
-                std.Clear();
+            if (!InquiryCommand.TryExecute(this, stdRequest, out _, out var std))
+                return false;
 
-                if (!TryScsiRead(
-                        commandBlock: [0x12, 0x00, 0x00, 0x00, 0x60, 0x00],
-                        returnBuffer: std,
-                        timeoutSeconds: timeoutSeconds,
-                        senseBuffer: sense,
-                        out scsiStatus,
-                        out bytesReturned))
-                {
-                    return false;
-                }
+            // 标准 INQUIRY：Vendor(8) offset=8；Product(16) offset=16
+            if (std.Length < 32) // 至少覆盖到 Product 字段末尾(16+16)
+                return false;
 
-                // 标准 INQUIRY：Vendor(8) offset=8；Product(16) offset=16
-                if (bytesReturned < 32) // 至少覆盖到 Product 字段末尾(16+16)
-                    return false;
-
-                Vendor = Encoding.ASCII.GetString(std.Slice(8, 8)).Trim();
-                Product = Encoding.ASCII.GetString(std.Slice(16, 16)).Trim();
-                Log.Debug("Drive Vendor={Vendor},Product={Product},Revision={Revision}", Vendor, Product, SerialNumber);
-                return true;
-            }
-            finally
-            {
-                if (rented is not null)
-                    ArrayPool<byte>.Shared.Return(rented);
-            }
+            Vendor = Encoding.ASCII.GetString(std.AsSpan(8, 8)).Trim();
+            Product = Encoding.ASCII.GetString(std.AsSpan(16, 16)).Trim();
+            Log.Debug("Drive Vendor={Vendor},Product={Product},Revision={Revision}", Vendor, Product, SerialNumber);
+            return true;
         }
     }
 
