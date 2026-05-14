@@ -1,17 +1,18 @@
 <Solution>
   <Configurations>
-    <Platform Name="ARM64" />
     <Platform Name="x64" />
-    <Platform Name="x86" />
   </Configurations>
+  <Project Path="Koko.Core.Tests/Koko.Core.Tests.csproj" Id="6d056806-c7cf-4d5a-a936-6c06514aa351">
+    <Platform Project="x64" />
+  </Project>
   <Project Path="Koko.Core/Koko.Core.csproj" Id="c23c8307-abb5-4497-b363-0423e26ee952">
-    <Platform Solution="*|x64" Project="x64" />
+    <Platform Project="x64" />
+  </Project>
+  <Project Path="Koko.DebugUI/Koko.DebugUI.csproj" Id="5e05856d-4284-4eba-9330-2d15368c9ca8">
+    <Platform Project="x64" />
   </Project>
   <Project Path="Koko.Demo/Koko.Demo.csproj" Id="a58b8a89-cecc-4da9-8666-3eb665bd1ab4">
-    <Platform Solution="*|x64" Project="x64" />
+    <Platform Project="x64" />
   </Project>
-  <Project Path="Koko/Koko.csproj">
-    <Platform Solution="*|x64" Project="x64" />
-    <Deploy />
-  </Project>
+  <Project Path="Koko.Web/Koko.Web.csproj" Id="fa565e66-216c-47b6-8838-967fc1f58dab" />
 </Solution>

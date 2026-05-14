@@ -1,0 +1,6 @@
+@Koko.Web_HostAddress = http://localhost:5197
+
+GET {{Koko.Web_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
