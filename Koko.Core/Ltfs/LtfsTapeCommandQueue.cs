@@ -41,28 +41,137 @@ public enum LtfsTapeBarrierKind
     SessionBarrier
 }
 
+public enum LtfsTapeCommandSafeBoundary
+{
+    Block,
+    File,
+    PackedBlock,
+    Checkpoint,
+    Idle
+}
+
+public enum LtfsTapeCommandCancellationMode
+{
+    CompleteCurrentCommand,
+    CompleteCurrentBlock,
+    CompleteCurrentFile,
+    AbortAfterCurrentCommand
+}
+
+public enum LtfsTapeCommandExecutorState
+{
+    Created,
+    Reserved,
+    Positioned,
+    WritingData,
+    CheckpointBarrier,
+    HealthBarrier,
+    FlushReloadBarrier,
+    Paused,
+    Finalizing,
+    Faulted,
+    Completed
+}
+
+public enum LtfsPauseMode
+{
+    AfterBlock,
+    AfterFile,
+    AfterCheckpoint
+}
+
+public enum LtfsCancelMode
+{
+    SoftAfterBlock,
+    SoftAfterFile,
+    AbortAfterCurrentCommand
+}
+
 public sealed record LtfsTapeCommand(
     LtfsTapeCommandKind Kind,
     Func<CancellationToken, ValueTask> ExecuteAsync,
     LtfsTapeCommandPriority Priority = LtfsTapeCommandPriority.Control,
     LtfsTapeBarrierKind Barrier = LtfsTapeBarrierKind.HardBarrier,
-    string? CorrelationId = null);
+    string? CorrelationId = null,
+    Guid? CommandId = null,
+    LtfsTapeCommandSafeBoundary SafeBoundary = LtfsTapeCommandSafeBoundary.Block,
+    LtfsTapePosition? ExpectedStartPosition = null,
+    LtfsTapePosition? ExpectedEndPosition = null,
+    bool AffectsPosition = true,
+    bool AffectsIndex = false,
+    bool CanCoalesce = false,
+    LtfsTapeCommandCancellationMode CancellationMode = LtfsTapeCommandCancellationMode.CompleteCurrentCommand,
+    TimeSpan? Timeout = null);
 
 public sealed record LtfsTapeCommandResult(
     LtfsTapeCommand Command,
     bool Succeeded,
-    Exception? Exception = null);
+    Exception? Exception = null,
+    LtfsTapeCommandExecutorState State = LtfsTapeCommandExecutorState.Completed);
+
+public sealed record LtfsTapeCommandExecutorSnapshot(
+    LtfsTapeCommandExecutorState State,
+    int PendingCommandCount,
+    bool PauseRequested,
+    bool CancelRequested,
+    LtfsCancelMode? CancelMode);
+
+public sealed class LtfsTapeSessionControl
+{
+    private readonly ManualResetEventSlim resumeGate = new(true);
+
+    public bool PauseRequested { get; private set; }
+
+    public LtfsPauseMode? PauseMode { get; private set; }
+
+    public bool CancelRequested { get; private set; }
+
+    public LtfsCancelMode? CancelMode { get; private set; }
+
+    public void RequestPause(LtfsPauseMode mode)
+    {
+        PauseMode = mode;
+        PauseRequested = true;
+        resumeGate.Reset();
+    }
+
+    public void Resume()
+    {
+        PauseRequested = false;
+        PauseMode = null;
+        resumeGate.Set();
+    }
+
+    public void RequestCancel(LtfsCancelMode mode)
+    {
+        CancelRequested = true;
+        CancelMode = mode;
+        resumeGate.Set();
+    }
+
+    internal void WaitIfPaused(CancellationToken cancellationToken)
+    {
+        while (PauseRequested && !CancelRequested)
+            resumeGate.Wait(TimeSpan.FromMilliseconds(50), cancellationToken);
+    }
+}
 
 public sealed class LtfsTapeCommandQueue
 {
-    private readonly Queue<LtfsTapeCommand> commands = [];
+    private readonly List<LtfsTapeCommand> commands = [];
 
     public int Count => commands.Count;
 
     public void Enqueue(LtfsTapeCommand command)
     {
         ArgumentNullException.ThrowIfNull(command);
-        commands.Enqueue(command);
+        if (command.Priority is LtfsTapeCommandPriority.Telemetry or LtfsTapeCommandPriority.Background
+            || (command.Priority == LtfsTapeCommandPriority.Control && command.CanCoalesce))
+        {
+            commands.RemoveAll(x => x.Kind == command.Kind && string.Equals(x.CorrelationId, command.CorrelationId, StringComparison.Ordinal));
+        }
+
+        commands.Add(command);
     }
 
     public bool TryDequeue(out LtfsTapeCommand command)
@@ -73,15 +182,60 @@ public sealed class LtfsTapeCommandQueue
             return false;
         }
 
-        command = commands.Dequeue();
+        var index = SelectNextCommandIndex();
+        command = commands[index];
+        commands.RemoveAt(index);
         return true;
+    }
+
+    private int SelectNextCommandIndex()
+    {
+        var bestIndex = 0;
+        var bestRank = PriorityRank(commands[0]);
+        for (var i = 1; i < commands.Count; i++)
+        {
+            var rank = PriorityRank(commands[i]);
+            if (rank >= bestRank)
+                continue;
+
+            bestRank = rank;
+            bestIndex = i;
+        }
+
+        return bestIndex;
+    }
+
+    private static int PriorityRank(LtfsTapeCommand command)
+    {
+        return command.Priority switch
+        {
+            LtfsTapeCommandPriority.Health => 1,
+            LtfsTapeCommandPriority.Control => command.Barrier == LtfsTapeBarrierKind.SessionBarrier ? 0 : 2,
+            LtfsTapeCommandPriority.Data => 3,
+            LtfsTapeCommandPriority.Telemetry => 4,
+            LtfsTapeCommandPriority.Background => 5,
+            _ => 9,
+        };
     }
 }
 
 public sealed class LtfsTapeCommandExecutor
 {
+    public LtfsTapeCommandExecutorState State { get; private set; } = LtfsTapeCommandExecutorState.Created;
+
+    public LtfsTapeCommandExecutorSnapshot Snapshot(LtfsTapeCommandQueue queue, LtfsTapeSessionControl? control = null) =>
+        new(State, queue.Count, control?.PauseRequested ?? false, control?.CancelRequested ?? false, control?.CancelMode);
+
     public async ValueTask<IReadOnlyList<LtfsTapeCommandResult>> ExecuteAsync(
         LtfsTapeCommandQueue queue,
+        CancellationToken cancellationToken = default)
+    {
+        return await ExecuteAsync(queue, control: null, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<IReadOnlyList<LtfsTapeCommandResult>> ExecuteAsync(
+        LtfsTapeCommandQueue queue,
+        LtfsTapeSessionControl? control,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(queue);
@@ -90,19 +244,49 @@ public sealed class LtfsTapeCommandExecutor
         while (queue.TryDequeue(out var command))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (control?.CancelRequested == true && control.CancelMode == LtfsCancelMode.AbortAfterCurrentCommand)
+                break;
+
+            if (control?.PauseRequested == true)
+            {
+                State = LtfsTapeCommandExecutorState.Paused;
+                control.WaitIfPaused(cancellationToken);
+            }
+
+            if (control?.CancelRequested == true && command.Barrier != LtfsTapeBarrierKind.SessionBarrier)
+                break;
+
             try
             {
+                State = GetExecutionState(command);
                 await command.ExecuteAsync(cancellationToken).ConfigureAwait(false);
-                results.Add(new LtfsTapeCommandResult(command, true));
+                State = command.Barrier == LtfsTapeBarrierKind.SessionBarrier ? LtfsTapeCommandExecutorState.Reserved : LtfsTapeCommandExecutorState.Positioned;
+                results.Add(new LtfsTapeCommandResult(command, true, State: State));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                results.Add(new LtfsTapeCommandResult(command, false, ex));
+                State = LtfsTapeCommandExecutorState.Faulted;
+                results.Add(new LtfsTapeCommandResult(command, false, ex, State));
                 throw;
             }
         }
 
+        if (State != LtfsTapeCommandExecutorState.Faulted)
+            State = control?.CancelRequested == true ? LtfsTapeCommandExecutorState.Faulted : LtfsTapeCommandExecutorState.Completed;
         return results;
+    }
+
+    private static LtfsTapeCommandExecutorState GetExecutionState(LtfsTapeCommand command)
+    {
+        return command.Kind switch
+        {
+            LtfsTapeCommandKind.WriteDataBlock or LtfsTapeCommandKind.WriteDataRun => LtfsTapeCommandExecutorState.WritingData,
+            LtfsTapeCommandKind.RefreshIndexPartition or LtfsTapeCommandKind.WriteVolumeCoherencyInformation => LtfsTapeCommandExecutorState.CheckpointBarrier,
+            LtfsTapeCommandKind.ReadWriteErrorCounters => LtfsTapeCommandExecutorState.HealthBarrier,
+            LtfsTapeCommandKind.LoadUnload => LtfsTapeCommandExecutorState.FlushReloadBarrier,
+            LtfsTapeCommandKind.AllowRemoval or LtfsTapeCommandKind.ReleaseDrive => LtfsTapeCommandExecutorState.Finalizing,
+            _ => command.Barrier == LtfsTapeBarrierKind.SessionBarrier ? LtfsTapeCommandExecutorState.Reserved : LtfsTapeCommandExecutorState.Positioned,
+        };
     }
 }
 

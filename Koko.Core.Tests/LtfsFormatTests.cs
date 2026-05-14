@@ -57,6 +57,23 @@ public sealed class LtfsFormatTests
         await Assert.That(async () => await service.FormatAsync(new LtfsFormatRequest("TESTVOL"))).ThrowsException();
     }
 
+    [Test]
+    public async Task Format_detected_worm_uses_legacy_worm_layout()
+    {
+        var device = new WormRecordingFormatDevice { LogSenseResponse = BuildWormLogSenseResponse() };
+        var service = new LtfsFormatService(device);
+
+        var result = await service.FormatAsync(new LtfsFormatRequest(
+            VolumeName: "WORMVOL",
+            DestructiveConfirmationToken: LtfsFormatService.DestructiveConfirmationToken));
+
+        await Assert.That(result.IndexPartitionIndexBlock).IsNull();
+        await Assert.That(result.Index.Location.Partition).IsEqualTo(LtfsPartition.B);
+        await Assert.That(string.Join("|", device.Events)).DoesNotContain("SetCapacity:");
+        await Assert.That(string.Join("|", device.Events)).DoesNotContain("Format:0");
+        await Assert.That(device.Blocks.ContainsKey((LtfsPartition.A, 5))).IsFalse();
+    }
+
     private static LtfsIndex ReadIndex(byte[] data)
     {
         using var stream = new MemoryStream(data);
@@ -65,7 +82,19 @@ public sealed class LtfsFormatTests
 
     private sealed record RecordedBlock(string Kind, byte[] Data);
 
-    private sealed class RecordingFormatDevice : ILtfsFormatDevice
+    private static LogSenseResponse BuildWormLogSenseResponse()
+    {
+        var raw = new byte[9];
+        raw[0] = LogPageCode.VolumeStatistics.Value;
+        raw[3] = 5;
+        raw[4] = 0;
+        raw[5] = 0x81;
+        raw[7] = 1;
+        raw[8] = 1;
+        return LogSenseResponse.FromRaw(raw);
+    }
+
+    private class RecordingFormatDevice : ILtfsFormatDevice
     {
         private LtfsPartition partition = LtfsPartition.A;
         private ulong block;
@@ -188,6 +217,17 @@ public sealed class LtfsFormatTests
             if (text.Contains("<ltfsindex", StringComparison.Ordinal))
                 return "ltfsindex";
             return "data";
+        }
+    }
+
+    private sealed class WormRecordingFormatDevice : RecordingFormatDevice, ILtfsWormDetectionDevice
+    {
+        public LogSenseResponse LogSenseResponse { get; set; } = LogSenseResponse.FromRaw(Array.Empty<byte>());
+
+        public ValueTask<LogSenseResponse> ReadLogSenseAsync(LogPageCode pageCode, CancellationToken cancellationToken = default)
+        {
+            Events.Add($"LogSense:{pageCode.Value}");
+            return ValueTask.FromResult(LogSenseResponse);
         }
     }
 }

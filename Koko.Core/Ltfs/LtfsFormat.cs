@@ -30,9 +30,10 @@ public sealed record LtfsFormatRequest(
     ushort P1Size = 0xFFFF,
     string Creator = "Koko.Core",
     LtfsEncryptionOptions? Encryption = null,
-    LtfsAutosaveOptions? Autosave = null);
+    LtfsAutosaveOptions? Autosave = null,
+    LtfsWormPolicyOptions? WormPolicy = null);
 
-public sealed record LtfsTapePosition(LtfsPartition Partition, ulong Block);
+public sealed record LtfsTapePosition(LtfsPartition Partition, ulong Block, ulong? FileNumber = null);
 
 public sealed record LtfsFormatResult(
     LtfsLabel Label,
@@ -100,6 +101,11 @@ public interface ILtfsFormatDevice
     ValueTask WriteMamAttributesAsync(LtfsPartition partition, IReadOnlyList<MamAttribute> attributes, CancellationToken cancellationToken = default);
 }
 
+public interface ILtfsWormDetectionDevice
+{
+    ValueTask<LogSenseResponse> ReadLogSenseAsync(LogPageCode pageCode, CancellationToken cancellationToken = default);
+}
+
 public sealed class LtfsFormatService
 {
     public const string DestructiveConfirmationToken = "FORMAT_LTFS";
@@ -143,14 +149,24 @@ public sealed class LtfsFormatService
             if (request.PartitionMode == LtfsPartitionMode.TwoPartition && maxExtraPartitions < 1)
                 throw new InvalidOperationException("Two-partition LTFS format requires at least one extra partition.");
 
-            if (!request.Worm)
+            var detectedWorm = await DetectWormAsync(cancellationToken).ConfigureAwait(false);
+            var effectiveWorm = request.Worm || detectedWorm == true;
+
+            if (!effectiveWorm)
             {
                 Publish(operationId, LtfsFormatStepKind.Preflight, $"Set capacity proportion {request.Capacity}.");
                 await device.SetCapacityAsync(request.Capacity, cancellationToken).ConfigureAwait(false);
             }
 
-            Publish(operationId, LtfsFormatStepKind.FormatMedium, "Initialize medium.");
-            await device.FormatMediumAsync(formatCode: 0, cancellationToken).ConfigureAwait(false);
+            if (!effectiveWorm)
+            {
+                Publish(operationId, LtfsFormatStepKind.FormatMedium, "Initialize medium.");
+                await device.FormatMediumAsync(formatCode: 0, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                Publish(operationId, LtfsFormatStepKind.FormatMedium, "WORM medium detected/requested; skip destructive medium initialization.");
+            }
 
             if (request.PartitionMode == LtfsPartitionMode.TwoPartition)
             {
@@ -188,7 +204,7 @@ public sealed class LtfsFormatService
                 Publish(operationId, LtfsFormatStepKind.WriteIndexPartitionLabel, "Write index partition VOL1 and LTFS label.");
                 await WritePartitionPreambleAsync(LtfsPartition.A, label, request.Barcode, twoFilemarksAfterLabel: false, cancellationToken).ConfigureAwait(false);
 
-                if (request.WriteInitialIndexPartition && !request.Worm)
+                if (request.WriteInitialIndexPartition && !effectiveWorm)
                 {
                     await device.WriteFilemarksAsync(1, cancellationToken).ConfigureAwait(false);
                     indexPartitionIndexBlock = (await device.ReadPositionAsync(cancellationToken).ConfigureAwait(false)).Block;
@@ -204,8 +220,15 @@ public sealed class LtfsFormatService
             if (request.WriteVci)
             {
                 Publish(operationId, LtfsFormatStepKind.WriteVci, "Write volume coherency information.");
-                await WriteVciAsync(finalIndex.GenerationNumber, indexPartitionIndexBlock, dataIndexBlock, finalIndex.VolumeUuid, cancellationToken).ConfigureAwait(false);
-                vciWritten = true;
+                try
+                {
+                    await WriteVciAsync(finalIndex.GenerationNumber, indexPartitionIndexBlock, dataIndexBlock, finalIndex.VolumeUuid, cancellationToken).ConfigureAwait(false);
+                    vciWritten = true;
+                }
+                catch (Exception ex) when (effectiveWorm && (request.WormPolicy ?? new LtfsWormPolicyOptions()).AllowVciFailureWarning && ex is not OperationCanceledException)
+                {
+                    Publish(operationId, LtfsFormatStepKind.WriteVci, $"WORM VCI update failed after stable format index write: {ex.Message}");
+                }
             }
 
             Publish(operationId, LtfsFormatStepKind.Completed, "LTFS format completed.");
@@ -219,6 +242,7 @@ public sealed class LtfsFormatService
         }
         finally
         {
+            await ClearEncryptionOnReleaseAsync(request).ConfigureAwait(false);
             if (removalPrevented)
                 await device.PreventRemovalAsync(false, CancellationToken.None).ConfigureAwait(false);
             if (reserved)
@@ -317,6 +341,38 @@ public sealed class LtfsFormatService
 
         await encryptionDevice.SetEncryptionAsync(material.Key, cancellationToken).ConfigureAwait(false);
         eventBus.Publish(new LtfsEncryptionEvent(operationId, "LTFS encryption key applied.", material.KeyFingerprint));
+    }
+
+    private async ValueTask ClearEncryptionOnReleaseAsync(LtfsFormatRequest request)
+    {
+        var encryption = request.Encryption ?? new LtfsEncryptionOptions();
+        if (!encryption.ClearDeviceKeyOnRelease || device is not ILtfsEncryptionCapableDevice encryptionDevice)
+            return;
+
+        try
+        {
+            await encryptionDevice.SetEncryptionAsync(null, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Cleanup must not mask the primary format result.
+        }
+    }
+
+    private async ValueTask<bool?> DetectWormAsync(CancellationToken cancellationToken)
+    {
+        if (device is not ILtfsWormDetectionDevice wormDevice)
+            return null;
+
+        try
+        {
+            var response = await wormDevice.ReadLogSenseAsync(LogPageCode.VolumeStatistics, cancellationToken).ConfigureAwait(false);
+            return LtfsWormDetector.TryDetectFromVolumeStatistics(response);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
     }
 
     private async ValueTask TryExportAutosaveAsync(
@@ -429,7 +485,7 @@ public sealed class LtfsFormatService
     }
 }
 
-public sealed class ScsiLtfsFormatDevice : ILtfsFormatDevice, ILtfsEncryptionCapableDevice
+public sealed class ScsiLtfsFormatDevice : ILtfsFormatDevice, ILtfsEncryptionCapableDevice, ILtfsWormDetectionDevice
 {
     private readonly IScsiDrive drive;
 
@@ -565,6 +621,14 @@ public sealed class ScsiLtfsFormatDevice : ILtfsFormatDevice, ILtfsEncryptionCap
     public ValueTask<LtfsTapePosition> ReadPositionAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (ReadPositionCommand.TryExecute(drive, new ReadPositionCommand(ReadPositionServiceAction.LongForm), out var longResult, out var longResponse)
+            && longResult.IsGood
+            && longResponse.LongForm is { } longForm
+            && longForm.LogicalObjectNumberValid)
+        {
+            return ValueTask.FromResult(new LtfsTapePosition(FromPartitionNumber((byte)Math.Min(longForm.PartitionNumber, byte.MaxValue)), longForm.BlockNumber, longForm.FileNumber));
+        }
+
         Ensure(ReadPositionCommand.TryExecute(drive, new ReadPositionCommand(ReadPositionServiceAction.ShortForm), out var result, out var response), result, "READ POSITION failed.");
         var shortForm = response.ShortForm ?? throw new InvalidOperationException("READ POSITION short form response was not parseable.");
         return ValueTask.FromResult(new LtfsTapePosition(FromPartitionNumber(shortForm.PartitionNumber), shortForm.FirstBlockLocation));
@@ -601,6 +665,13 @@ public sealed class ScsiLtfsFormatDevice : ILtfsFormatDevice, ILtfsEncryptionCap
         var payload = LtfsEncryptionPayloadBuilder.BuildSetEncryptionPayload(key);
         Ensure(SecurityProtocolOutCommand.TryExecute(drive, new SecurityProtocolOutCommand(0x20, 0x0010, payload), out var result), result, "SECURITY PROTOCOL OUT set encryption failed.");
         return ValueTask.CompletedTask;
+    }
+
+    public ValueTask<LogSenseResponse> ReadLogSenseAsync(LogPageCode pageCode, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Ensure(LogSenseCommand.TryExecute(drive, new LogSenseCommand(pageCode), out var result, out var response), result, "LOG SENSE failed.");
+        return ValueTask.FromResult(response);
     }
 
     private static byte ToPartitionNumber(LtfsPartition partition)

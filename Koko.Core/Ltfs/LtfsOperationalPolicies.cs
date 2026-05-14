@@ -13,8 +13,10 @@ public enum LtfsWriterErrorKind
     Unknown,
     Transport,
     ScsiCheckCondition,
+    EarlyWarningEndOfMedium,
     EndOfMedium,
     VolumeOverflow,
+    WriteProtected,
     SourceRead,
     IndexCommit,
     Vci,
@@ -88,6 +90,14 @@ public sealed class LtfsScsiCommandException : Exception
     public bool EndOfMedium => SenseData.Length >= 3 && (SenseData[2] & 0x40) != 0;
 
     public bool VolumeOverflow => SenseKey == 0x0D;
+
+    public byte AdditionalSenseCode => SenseData.Length >= 13 ? SenseData[12] : (byte)0;
+
+    public byte AdditionalSenseCodeQualifier => SenseData.Length >= 14 ? SenseData[13] : (byte)0;
+
+    public bool EarlyWarningEndOfMedium => EndOfMedium && SenseKey == 0x00 && AdditionalSenseCode == 0x00 && AdditionalSenseCodeQualifier == 0x02;
+
+    public bool WriteProtected => SenseKey == 0x07;
 }
 
 public enum LtfsEncryptionMode
@@ -120,6 +130,20 @@ public interface ILtfsEncryptionKeyProvider
 public interface ILtfsEncryptionCapableDevice
 {
     ValueTask SetEncryptionAsync(ReadOnlyMemory<byte>? key, CancellationToken cancellationToken = default);
+}
+
+public static class LtfsWormDetector
+{
+    public const ushort VolumeStatisticsWormParameterCode = 0x0081;
+
+    public static bool? TryDetectFromVolumeStatistics(LogSenseResponse response)
+    {
+        var parameter = response.Parameters.FirstOrDefault(x => x.ParameterCode == VolumeStatisticsWormParameterCode);
+        if (parameter.Value.IsEmpty)
+            return null;
+
+        return parameter.Value.Span[^1] != 0;
+    }
 }
 
 public sealed record LtfsEncryptionEvent(
@@ -176,7 +200,8 @@ public sealed record LtfsAutosaveRequest(
     LtfsLabel? Label,
     LtfsAutosaveOptions Options,
     IReadOnlyList<LtfsWriteSource>? Sources = null,
-    ILtfsMetadataExportDevice? MetadataDevice = null);
+    ILtfsMetadataExportDevice? MetadataDevice = null,
+    LtfsRemainingManifest? RemainingManifest = null);
 
 public sealed class LtfsAutosaveExporter
 {
@@ -275,6 +300,13 @@ public sealed class LtfsAutosaveExporter
                     }).ToArray() ?? [],
                 };
                 await WriteJsonTempAsync(path, manifest, cancellationToken).ConfigureAwait(false);
+                entries.Add(new AutosaveArchiveEntry(path, Path.GetFileName(path)));
+            }
+
+            if (request.RemainingManifest is not null)
+            {
+                var path = Path.Combine(stagingDirectory, stem + ".remaining.json");
+                await WriteJsonTempAsync(path, request.RemainingManifest, cancellationToken).ConfigureAwait(false);
                 entries.Add(new AutosaveArchiveEntry(path, Path.GetFileName(path)));
             }
 

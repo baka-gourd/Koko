@@ -163,6 +163,36 @@ public enum LtfsWriteHealthAction
     Abort
 }
 
+public enum LtfsWriteCompletionKind
+{
+    Completed,
+    StoppedAtEndOfMedium,
+    SoftCanceled,
+    Aborted
+}
+
+public enum LtfsDirtyAppendPolicy
+{
+    Abort,
+    AllowWithWarning
+}
+
+public sealed record LtfsAppendValidationOptions(
+    bool Enabled = false,
+    LtfsDirtyAppendPolicy DirtyAppendPolicy = LtfsDirtyAppendPolicy.Abort);
+
+public sealed record LtfsEomPolicyOptions(
+    bool Enabled = true,
+    bool CheckpointAtSafeBoundary = true,
+    bool ExportRemainingManifest = true,
+    bool MultiVolumeEnabled = false);
+
+public sealed record LtfsWormPolicyOptions(
+    bool AutoDetect = true,
+    bool FailClosedWhenInconclusive = true,
+    bool AllowCorrectiveRollback = false,
+    bool AllowVciFailureWarning = true);
+
 public sealed record LtfsWriteHealthDecision(
     LtfsWriteHealthAction Action,
     string Reason,
@@ -194,6 +224,12 @@ public sealed record LtfsWriterOptions(
     LtfsHealthSamplingOptions? HealthSampling = null,
     LtfsEncryptionOptions? Encryption = null,
     LtfsAutosaveOptions? Autosave = null,
+    LtfsAppendValidationOptions? AppendValidation = null,
+    LtfsEomPolicyOptions? EomPolicy = null,
+    LtfsWormPolicyOptions? WormPolicy = null,
+    LtfsCapacityPolicyOptions? CapacityPolicy = null,
+    LtfsVolumeDiscoveryResult? Discovery = null,
+    LtfsTapeSessionControl? TapeControl = null,
     Func<LtfsWriterPolicyContext, CancellationToken, ValueTask<LtfsWriterPolicyDecision>>? PolicyHandler = null,
     Func<LtfsWriterErrorContext, CancellationToken, ValueTask<LtfsWriterErrorDecision>>? ErrorHandler = null)
 {
@@ -256,7 +292,11 @@ public sealed record LtfsWriteResult(
     bool DataPartitionIndexWritten,
     bool IndexPartitionRefreshed,
     bool VciWritten,
-    bool DryRun);
+    bool DryRun,
+    LtfsWriteCompletionKind CompletionKind = LtfsWriteCompletionKind.Completed,
+    LtfsRemainingManifest? RemainingManifest = null,
+    IReadOnlyList<string>? RemainingManifestArchivePaths = null,
+    LtfsIndex? LastStableIndex = null);
 
 public sealed record LtfsRollbackRequest(
     LtfsIndex CurrentIndex,
@@ -559,6 +599,8 @@ public sealed class LtfsWriterService
 
             var index = request.Index.Clone();
             var targetDirectory = FindDirectoryClone(index, request.TargetDirectory.FileUid) ?? throw new LtfsWriterException("Target directory does not exist in the supplied LTFS index.");
+            if (request.OverwriteExisting && ((options.Discovery?.Worm ?? false) || index.VolumeLockState == LtfsVolumeLockState.PermLocked))
+                throw new LtfsWriterException("WORM LTFS append cannot overwrite existing files.");
             if (request.DryRun)
                 return new LtfsWriteResult(index, 0, 0, false, false, false, DryRun: true);
 
@@ -570,6 +612,9 @@ public sealed class LtfsWriterService
             var indexPartitionRefreshed = false;
             var vciWritten = false;
             var counters = new LtfsIndexCounters(0, 0, DateTimeOffset.UtcNow);
+            var completionKind = LtfsWriteCompletionKind.Completed;
+            LtfsRemainingManifest? remainingManifest = null;
+            IReadOnlyList<string>? remainingArtifacts = null;
 
             try
             {
@@ -577,6 +622,7 @@ public sealed class LtfsWriterService
                 reserved = true;
                 removalPrevented = true;
 
+                await ValidateAppendBaselineAsync(operationId, index, request.Label, options, cancellationToken).ConfigureAwait(false);
                 await LocateToWritePositionAsync(operationId, index, options, cancellationToken).ConfigureAwait(false);
 
                 var writeState = await WritePlannedSourcesAsync(
@@ -592,29 +638,49 @@ public sealed class LtfsWriterService
                 filesWritten = writeState.FilesWritten;
                 counters = writeState.Counters;
                 dataIndexWritten = writeState.DataPartitionIndexWritten;
+                completionKind = writeState.CompletionKind;
+                remainingManifest = writeState.RemainingManifest;
 
-                if (options.WriteDataPartitionIndexOnComplete && counters.UnindexedBytes != 0)
+                if (options.WriteDataPartitionIndexOnComplete && counters.UnindexedBytes != 0
+                    && (completionKind == LtfsWriteCompletionKind.Completed
+                        || completionKind == LtfsWriteCompletionKind.SoftCanceled
+                        || (options.EomPolicy!.CheckpointAtSafeBoundary && filesWritten > 0)))
                 {
-                    index = await WriteDataPartitionIndexAsync(operationId, index, options, request.Label, request.Sources, "checkpoint-final-data", cancellationToken).ConfigureAwait(false);
+                    var reason = completionKind switch
+                    {
+                        LtfsWriteCompletionKind.StoppedAtEndOfMedium => "checkpoint-eom-data",
+                        LtfsWriteCompletionKind.SoftCanceled => "checkpoint-soft-cancel",
+                        _ => "checkpoint-final-data",
+                    };
+                    index = await WriteDataPartitionIndexAsync(operationId, index, options, request.Label, request.Sources, reason, cancellationToken).ConfigureAwait(false);
                     dataIndexWritten = true;
                 }
 
-                if (options.RefreshIndexPartitionOnComplete)
+                if (completionKind == LtfsWriteCompletionKind.Completed && options.RefreshIndexPartitionOnComplete)
                 {
                     index = await RefreshIndexPartitionAsync(operationId, index, options, cancellationToken).ConfigureAwait(false);
                     indexPartitionRefreshed = true;
                     vciWritten = options.WriteVci;
                 }
-                else if (options.WriteVci)
+                else if (completionKind == LtfsWriteCompletionKind.Completed && options.WriteVci)
                 {
-                    await WriteVciAsync(operationId, index, cancellationToken).ConfigureAwait(false);
+                    await WriteVciWithWormPolicyAsync(operationId, index, options, cancellationToken).ConfigureAwait(false);
                     vciWritten = true;
                 }
 
-                await TryExportAutosaveAsync(operationId, "final", index, request.Label, request.Sources, options, cancellationToken).ConfigureAwait(false);
-                Publish(operationId, LtfsWriterStepKind.Completed, "LTFS write completed.", bytesWritten, bytesWritten, filesWritten, request.Sources.Count);
+                if (remainingManifest is not null && dataIndexWritten)
+                    remainingManifest = remainingManifest with { GenerationNumber = index.GenerationNumber, LastStableLocation = index.Location.Clone() };
+
+                var finalReason = completionKind switch
+                {
+                    LtfsWriteCompletionKind.StoppedAtEndOfMedium => "eom-remaining",
+                    LtfsWriteCompletionKind.SoftCanceled => "soft-cancel-remaining",
+                    _ => "final",
+                };
+                remainingArtifacts = await TryExportAutosaveAndReturnAsync(operationId, finalReason, index, request.Label, request.Sources, options, cancellationToken, remainingManifest).ConfigureAwait(false);
+                Publish(operationId, LtfsWriterStepKind.Completed, completionKind == LtfsWriteCompletionKind.Completed ? "LTFS write completed." : $"LTFS write finished with {completionKind}.", bytesWritten, bytesWritten, filesWritten, request.Sources.Count);
                 Log.Information("LTFS write completed. OperationId={OperationId}, BytesWritten={BytesWritten}, FilesWritten={FilesWritten}", operationId, bytesWritten, filesWritten);
-                return new LtfsWriteResult(index, bytesWritten, filesWritten, dataIndexWritten, indexPartitionRefreshed, vciWritten, DryRun: false);
+                return new LtfsWriteResult(index, bytesWritten, filesWritten, dataIndexWritten, indexPartitionRefreshed, vciWritten, DryRun: false, completionKind, remainingManifest, remainingArtifacts, index.Clone());
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -624,7 +690,7 @@ public sealed class LtfsWriterService
             }
             finally
             {
-                await ReleaseDriveAsync(removalPrevented, reserved).ConfigureAwait(false);
+                await ReleaseDriveAsync(removalPrevented, reserved, options).ConfigureAwait(false);
             }
         }
     }
@@ -668,7 +734,7 @@ public sealed class LtfsWriterService
             }
             finally
             {
-                await ReleaseDriveAsync(removalPrevented, reserved).ConfigureAwait(false);
+                await ReleaseDriveAsync(removalPrevented, reserved, options).ConfigureAwait(false);
             }
         }
     }
@@ -701,7 +767,16 @@ public sealed class LtfsWriterService
                 reserved = true;
                 removalPrevented = true;
 
-                await new LtfsSequentialReadExecutor(device).ExecuteAsync(plan, sink, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await new LtfsSequentialReadExecutor(device).ExecuteAsync(plan, sink, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (IsEncryptionRelated(ex) && sink.BytesRead == 0 && sink.FilesCompleted == 0)
+                {
+                    await ApplyEncryptionAsync(operationId, options, cancellationToken).ConfigureAwait(false);
+                    await new LtfsSequentialReadExecutor(device).ExecuteAsync(plan, sink, cancellationToken).ConfigureAwait(false);
+                }
+
                 Publish(operationId, LtfsWriterStepKind.ReadCompleted, "LTFS read completed.", sink.BytesRead, sink.TotalBytes, sink.FilesCompleted, request.Targets.Count);
                 Log.Information("LTFS read completed. OperationId={OperationId}, BytesRead={BytesRead}, FilesRead={FilesRead}", operationId, sink.BytesRead, sink.FilesCompleted);
                 return new LtfsExtractResult(sink.BytesRead, sink.FilesCompleted, plan, DryRun: false);
@@ -714,7 +789,7 @@ public sealed class LtfsWriterService
             finally
             {
                 await sink.DisposeAsync().ConfigureAwait(false);
-                await ReleaseDriveAsync(removalPrevented, reserved).ConfigureAwait(false);
+                await ReleaseDriveAsync(removalPrevented, reserved, options).ConfigureAwait(false);
             }
         }
     }
@@ -744,6 +819,54 @@ public sealed class LtfsWriterService
         await device.LocateEndOfDataAsync(LtfsPartition.B, cancellationToken).ConfigureAwait(false);
     }
 
+    private async ValueTask ValidateAppendBaselineAsync(
+        string operationId,
+        LtfsIndex index,
+        LtfsLabel? label,
+        LtfsWriterOptions options,
+        CancellationToken cancellationToken)
+    {
+        var validation = options.AppendValidation ?? new LtfsAppendValidationOptions();
+        if (!validation.Enabled && options.Discovery is null)
+            return;
+
+        var result = LtfsIndexValidator.ValidateInternal(index, new LtfsIndexValidationOptions(options.BlockSizeBytes));
+        if (!result.IsValid)
+            throw new LtfsWriterException("LTFS append baseline index is invalid: " + string.Join("; ", result.Errors));
+
+        if (label is not null)
+        {
+            if (label.VolumeUuid != Guid.Empty && index.VolumeUuid != Guid.Empty && label.VolumeUuid != index.VolumeUuid)
+                throw new LtfsWriterException("LTFS append baseline label and index volume UUID do not match.");
+            if (label.BlockSize > 0 && label.BlockSize != options.BlockSizeBytes)
+                throw new LtfsWriterException("LTFS append baseline block size does not match writer options.");
+        }
+
+        if (index.VolumeLockState == LtfsVolumeLockState.PermLocked && !(options.Discovery?.Worm ?? false))
+            throw new LtfsWriterException("LTFS append baseline is permanently locked.");
+
+        var discovery = options.Discovery;
+        if (discovery is not null)
+        {
+            if (discovery.Index.VolumeUuid != Guid.Empty && index.VolumeUuid != Guid.Empty && discovery.Index.VolumeUuid != index.VolumeUuid)
+                throw new LtfsWriterException("LTFS discovery result belongs to a different volume.");
+            if (discovery.DirtyAppendDetected && validation.DirtyAppendPolicy == LtfsDirtyAppendPolicy.Abort)
+                throw new LtfsWriterException("LTFS discovery found unindexed data after the latest stable checkpoint.");
+        }
+
+        var expected = discovery?.AppendPoint;
+        if (expected is not null)
+        {
+            await device.LocateEndOfDataAsync(LtfsPartition.B, cancellationToken).ConfigureAwait(false);
+            var actual = await device.ReadPositionAsync(cancellationToken).ConfigureAwait(false);
+            if (actual.Partition != LtfsPartition.B || actual.Block < expected.Block)
+                throw new LtfsWriterException($"LTFS append point is before the latest stable checkpoint. Expected >= B{expected.Block}, actual {actual.Partition}{actual.Block}.");
+            if (actual.Block > expected.Block && validation.DirtyAppendPolicy == LtfsDirtyAppendPolicy.Abort)
+                throw new LtfsWriterException("LTFS append point contains unindexed data and dirty append is not allowed.");
+            Publish(operationId, LtfsWriterStepKind.LocateWritePosition, $"Validated LTFS append point at B{actual.Block}.");
+        }
+    }
+
     private async ValueTask<LtfsWritePlanState> WritePlannedSourcesAsync(
         string operationId,
         LtfsIndex index,
@@ -760,10 +883,18 @@ public sealed class LtfsWriterService
         long filesWritten = 0;
         var dataIndexWritten = false;
         var writeContext = CreateWritePolicyContext(operationId, options);
+        var capacityMonitor = new LtfsCapacityMonitor(device, options.CapacityPolicy ?? new LtfsCapacityPolicyOptions());
 
         for (var i = 0; i < sources.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var capacity = await capacityMonitor.SampleAsync(cancellationToken).ConfigureAwait(false);
+            if (!capacity.HasReserveFor(sources[i].Length, options.CapacityPolicy!.CompressionRatioEstimate))
+            {
+                var remaining = BuildRemainingManifest(index, "Capacity reserve reached before starting next file.", sources.Take(i), sources.Skip(i), includeCurrentAsRemaining: false);
+                return new LtfsWritePlanState(index, bytesWritten, filesWritten, counters, dataIndexWritten, LtfsWriteCompletionKind.StoppedAtEndOfMedium, remaining);
+            }
+
             var prepared = PreparePendingFile(index, targetDirectory, sources[i], overwriteExisting, options);
             if (prepared is null)
                 continue;
@@ -787,6 +918,16 @@ public sealed class LtfsWriterService
                     force: options.HealthSampling!.SampleAfterFile,
                     cancellationToken).ConfigureAwait(false);
                 (index, counters, dataIndexWritten) = await CheckpointIfNeededAsync(operationId, index, counters, dataIndexWritten, options, cancellationToken).ConfigureAwait(false);
+                if (writeContext.EndOfMediumStopRequested)
+                {
+                    var remaining = BuildRemainingManifest(index, writeContext.EndOfMediumReason ?? "End of medium reached.", sources.Take(i + 1), sources.Skip(i + 1), includeCurrentAsRemaining: false);
+                    return new LtfsWritePlanState(index, bytesWritten, filesWritten, counters, dataIndexWritten, LtfsWriteCompletionKind.StoppedAtEndOfMedium, remaining);
+                }
+                if (await StopForSessionControlAsync(options, cancellationToken).ConfigureAwait(false))
+                {
+                    var remaining = BuildRemainingManifest(index, "Soft cancel requested.", sources.Take(i + 1), sources.Skip(i + 1), includeCurrentAsRemaining: false);
+                    return new LtfsWritePlanState(index, bytesWritten, filesWritten, counters, dataIndexWritten, LtfsWriteCompletionKind.SoftCanceled, remaining);
+                }
                 continue;
             }
 
@@ -811,7 +952,16 @@ public sealed class LtfsWriterService
                     packedBytes += next.Source.Length;
                 }
 
-                await WritePackedSmallFilesAsync(operationId, pack, options, writeContext, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await WritePackedSmallFilesAsync(operationId, pack, options, writeContext, cancellationToken).ConfigureAwait(false);
+                }
+                catch (LtfsEndOfMediumStopException)
+                {
+                    var remaining = BuildRemainingManifest(index, "End of medium while writing packed small-file block.", sources.Take(i + 1), sources.Skip(i + 1), includeCurrentAsRemaining: true);
+                    return new LtfsWritePlanState(index, bytesWritten, filesWritten, counters, dataIndexWritten, LtfsWriteCompletionKind.StoppedAtEndOfMedium, remaining);
+                }
+
                 foreach (var item in pack)
                 {
                     item.Directory.Files.Add(item.File);
@@ -833,6 +983,16 @@ public sealed class LtfsWriterService
                     force: options.HealthSampling!.SampleAfterFile,
                     cancellationToken).ConfigureAwait(false);
                 (index, counters, dataIndexWritten) = await CheckpointIfNeededAsync(operationId, index, counters, dataIndexWritten, options, cancellationToken).ConfigureAwait(false);
+                if (writeContext.EndOfMediumStopRequested)
+                {
+                    var remaining = BuildRemainingManifest(index, writeContext.EndOfMediumReason ?? "End of medium reached.", sources.Take(i + 1), sources.Skip(i + 1), includeCurrentAsRemaining: false);
+                    return new LtfsWritePlanState(index, bytesWritten, filesWritten, counters, dataIndexWritten, LtfsWriteCompletionKind.StoppedAtEndOfMedium, remaining);
+                }
+                if (await StopForSessionControlAsync(options, cancellationToken).ConfigureAwait(false))
+                {
+                    var remaining = BuildRemainingManifest(index, "Soft cancel requested.", sources.Take(i + 1), sources.Skip(i + 1), includeCurrentAsRemaining: false);
+                    return new LtfsWritePlanState(index, bytesWritten, filesWritten, counters, dataIndexWritten, LtfsWriteCompletionKind.SoftCanceled, remaining);
+                }
                 continue;
             }
 
@@ -847,31 +1007,40 @@ public sealed class LtfsWriterService
             });
 
             Publish(operationId, LtfsWriterStepKind.WriteFileStarted, $"Writing '{prepared.File.Name}'.", bytesWritten, totalBytes, filesWritten, sources.Count);
-            await WriteSourceAsync(
-                operationId,
-                prepared.Source,
-                prepared.File,
-                options,
-                writeContext,
-                bytesWritten,
-                async (totalBytesSoFar, ct) =>
-                {
-                    var state = await SampleHealthIfNeededAsync(
-                        operationId,
-                        index,
-                        counters,
-                        dataIndexWritten,
-                        totalBytesSoFar,
-                        writeContext,
-                        options,
-                        checkpointAllowed: false,
-                        force: false,
-                        ct).ConfigureAwait(false);
-                    index = state.Index;
-                    counters = state.Counters;
-                    dataIndexWritten = state.DataIndexWritten;
-                },
-                cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await WriteSourceAsync(
+                    operationId,
+                    prepared.Source,
+                    prepared.File,
+                    options,
+                    writeContext,
+                    bytesWritten,
+                    async (totalBytesSoFar, ct) =>
+                    {
+                        var state = await SampleHealthIfNeededAsync(
+                            operationId,
+                            index,
+                            counters,
+                            dataIndexWritten,
+                            totalBytesSoFar,
+                            writeContext,
+                            options,
+                            checkpointAllowed: false,
+                            force: false,
+                            ct).ConfigureAwait(false);
+                        index = state.Index;
+                        counters = state.Counters;
+                        dataIndexWritten = state.DataIndexWritten;
+                    },
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (LtfsEndOfMediumStopException ex)
+            {
+                prepared.File.Extents.Clear();
+                var remaining = BuildRemainingManifest(index, ex.Message, sources.Take(i), sources.Skip(i), includeCurrentAsRemaining: true);
+                return new LtfsWritePlanState(index, bytesWritten, filesWritten, counters, dataIndexWritten, LtfsWriteCompletionKind.StoppedAtEndOfMedium, remaining);
+            }
 
             prepared.Directory.Files.Add(prepared.File);
             bytesWritten += prepared.Source.Length;
@@ -891,9 +1060,31 @@ public sealed class LtfsWriterService
                 force: options.HealthSampling!.SampleAfterFile,
                 cancellationToken).ConfigureAwait(false);
             (index, counters, dataIndexWritten) = await CheckpointIfNeededAsync(operationId, index, counters, dataIndexWritten, options, cancellationToken).ConfigureAwait(false);
+            if (writeContext.EndOfMediumStopRequested)
+            {
+                var remaining = BuildRemainingManifest(index, writeContext.EndOfMediumReason ?? "End of medium reached.", sources.Take(i + 1), sources.Skip(i + 1), includeCurrentAsRemaining: false);
+                return new LtfsWritePlanState(index, bytesWritten, filesWritten, counters, dataIndexWritten, LtfsWriteCompletionKind.StoppedAtEndOfMedium, remaining);
+            }
+            if (await StopForSessionControlAsync(options, cancellationToken).ConfigureAwait(false))
+            {
+                var remaining = BuildRemainingManifest(index, "Soft cancel requested.", sources.Take(i + 1), sources.Skip(i + 1), includeCurrentAsRemaining: false);
+                return new LtfsWritePlanState(index, bytesWritten, filesWritten, counters, dataIndexWritten, LtfsWriteCompletionKind.SoftCanceled, remaining);
+            }
         }
 
         return new LtfsWritePlanState(index, bytesWritten, filesWritten, counters, dataIndexWritten);
+    }
+
+    private async ValueTask<bool> StopForSessionControlAsync(LtfsWriterOptions options, CancellationToken cancellationToken)
+    {
+        var control = options.TapeControl;
+        if (control is null)
+            return false;
+
+        if (control.PauseRequested && !control.CancelRequested)
+            await Task.Run(() => control.WaitIfPaused(cancellationToken), cancellationToken).ConfigureAwait(false);
+
+        return control.CancelRequested && control.CancelMode is LtfsCancelMode.SoftAfterBlock or LtfsCancelMode.SoftAfterFile;
     }
 
     private async ValueTask WritePackedSmallFilesAsync(
@@ -983,6 +1174,7 @@ public sealed class LtfsWriterService
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 LtfsTapePosition? currentPosition = null;
+                var kind = ClassifyError(ex);
                 if (expectedPosition is not null)
                 {
                     try
@@ -1000,6 +1192,17 @@ public sealed class LtfsWriterService
                         Log.Warning(positionException, "Unable to read tape position after LTFS WRITE failure.");
                     }
                 }
+
+                if (kind is LtfsWriterErrorKind.EarlyWarningEndOfMedium)
+                {
+                    writeContext.EndOfMediumStopRequested = true;
+                    writeContext.EndOfMediumReason = "Early warning end-of-medium reached.";
+                    if (currentPosition is not null && expectedPosition is not null && currentPosition.Partition == expectedPosition.Partition && currentPosition.Block > expectedPosition.Block)
+                        return;
+                }
+
+                if (kind is LtfsWriterErrorKind.EndOfMedium or LtfsWriterErrorKind.VolumeOverflow)
+                    throw new LtfsEndOfMediumStopException(kind.ToString(), committedCurrentBlock: currentPosition is not null && expectedPosition is not null && currentPosition.Partition == expectedPosition.Partition && currentPosition.Block > expectedPosition.Block, ex);
 
                 var decision = await ResolvePolicyDecisionAsync(operationId, LtfsWriterStepKind.WriteBlock, message, ex, attempt, options, currentPosition, cancellationToken).ConfigureAwait(false);
                 PublishPolicyDecision(operationId, LtfsWriterStepKind.WriteBlock, ClassifyError(ex), decision, attempt);
@@ -1133,7 +1336,8 @@ public sealed class LtfsWriterService
         LtfsLabel? label,
         IReadOnlyList<LtfsWriteSource>? sources,
         LtfsWriterOptions options,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        LtfsRemainingManifest? remainingManifest = null)
     {
         var autosave = options.Autosave ?? new LtfsAutosaveOptions();
         if (!autosave.Enabled)
@@ -1149,12 +1353,48 @@ public sealed class LtfsWriterService
                     label?.Clone(),
                     autosave,
                     sources,
-                    device as ILtfsMetadataExportDevice),
+                    device as ILtfsMetadataExportDevice,
+                    remainingManifest),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             Publish(operationId, LtfsWriterStepKind.Warning, $"LTFS autosave/export failed: {ex.Message}", severity: KokoOperationSeverity.Warning);
+        }
+    }
+
+    private async ValueTask<IReadOnlyList<string>> TryExportAutosaveAndReturnAsync(
+        string operationId,
+        string reason,
+        LtfsIndex index,
+        LtfsLabel? label,
+        IReadOnlyList<LtfsWriteSource>? sources,
+        LtfsWriterOptions options,
+        CancellationToken cancellationToken,
+        LtfsRemainingManifest? remainingManifest = null)
+    {
+        var autosave = options.Autosave ?? new LtfsAutosaveOptions();
+        if (!autosave.Enabled)
+            return Array.Empty<string>();
+
+        try
+        {
+            return await new LtfsAutosaveExporter(eventBus).ExportAsync(
+                new LtfsAutosaveRequest(
+                    operationId,
+                    reason,
+                    index.Clone(),
+                    label?.Clone(),
+                    autosave,
+                    sources,
+                    device as ILtfsMetadataExportDevice,
+                    remainingManifest),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Publish(operationId, LtfsWriterStepKind.Warning, $"LTFS autosave/export failed: {ex.Message}", severity: KokoOperationSeverity.Warning);
+            return Array.Empty<string>();
         }
     }
 
@@ -1192,6 +1432,40 @@ public sealed class LtfsWriterService
             UnindexedBytes = counters.UnindexedBytes + Math.Max(1, source.Length),
             UnindexedFiles = counters.UnindexedFiles + 1,
         };
+    }
+
+    private static LtfsRemainingManifest BuildRemainingManifest(
+        LtfsIndex index,
+        string reason,
+        IEnumerable<LtfsWriteSource> completedSources,
+        IEnumerable<LtfsWriteSource> remainingSources,
+        bool includeCurrentAsRemaining)
+    {
+        var completed = completedSources
+            .Select(x => new LtfsRemainingManifestItem(x.Name, x.SourcePath, x.DestinationPath, x.Length, "Completed"))
+            .ToArray();
+        var remaining = remainingSources
+            .Select((x, n) => new LtfsRemainingManifestItem(
+                x.Name,
+                x.SourcePath,
+                x.DestinationPath,
+                x.Length,
+                includeCurrentAsRemaining && n == 0 ? "Interrupted" : "Pending",
+                includeCurrentAsRemaining && n == 0 ? reason : null))
+            .ToArray();
+        var interrupted = includeCurrentAsRemaining ? remaining.FirstOrDefault() : null;
+
+        return new LtfsRemainingManifest(
+            index.VolumeUuid,
+            index.GenerationNumber,
+            index.Location.Clone(),
+            reason,
+            DateTimeOffset.UtcNow,
+            completed,
+            remaining,
+            VolumeSetId: Guid.NewGuid(),
+            NextAction: remaining.Length == 0 ? null : "ContinueOnNextVolume",
+            InterruptedFile: interrupted);
     }
 
     private static LtfsPendingFile? PreparePendingFile(
@@ -1390,7 +1664,10 @@ public sealed class LtfsWriterService
             ? current.Location.StartBlock
             : current.PreviousGenerationLocation.StartBlock;
 
-        await device.LocateFilemarkAsync(LtfsPartition.A, 3, cancellationToken).ConfigureAwait(false);
+        if ((options.Discovery?.Worm ?? false) || current.VolumeLockState == LtfsVolumeLockState.PermLocked)
+            await device.LocateEndOfDataAsync(LtfsPartition.A, cancellationToken).ConfigureAwait(false);
+        else
+            await device.LocateFilemarkAsync(LtfsPartition.A, 3, cancellationToken).ConfigureAwait(false);
         await device.WriteFilemarksAsync(1, cancellationToken).ConfigureAwait(false);
         var position = await device.ReadPositionAsync(cancellationToken).ConfigureAwait(false);
         var refreshed = LtfsIndexUpdater.CreateIndexPartitionRefresh(current, position.Block, DateTimeOffset.UtcNow);
@@ -1398,9 +1675,29 @@ public sealed class LtfsWriterService
         await device.WriteFilemarksAsync(1, cancellationToken).ConfigureAwait(false);
 
         if (options.WriteVci)
-            await WriteVciAsync(operationId, refreshed, dataBlock, cancellationToken).ConfigureAwait(false);
+            await WriteVciWithWormPolicyAsync(operationId, refreshed, dataBlock, options, cancellationToken).ConfigureAwait(false);
 
         return refreshed;
+    }
+
+    private async ValueTask WriteVciWithWormPolicyAsync(string operationId, LtfsIndex index, LtfsWriterOptions options, CancellationToken cancellationToken)
+    {
+        var dataBlock = index.Location.Partition == LtfsPartition.B
+            ? index.Location.StartBlock
+            : index.PreviousGenerationLocation.StartBlock;
+        await WriteVciWithWormPolicyAsync(operationId, index, dataBlock, options, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask WriteVciWithWormPolicyAsync(string operationId, LtfsIndex index, ulong dataBlock, LtfsWriterOptions options, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await WriteVciAsync(operationId, index, dataBlock, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException && ((options.Discovery?.Worm ?? false) || index.VolumeLockState == LtfsVolumeLockState.PermLocked) && options.WormPolicy!.AllowVciFailureWarning)
+        {
+            Publish(operationId, LtfsWriterStepKind.Warning, $"WORM VCI update failed after stable index write: {ex.Message}", severity: KokoOperationSeverity.Warning);
+        }
     }
 
     private async ValueTask WriteVciAsync(string operationId, LtfsIndex index, CancellationToken cancellationToken)
@@ -1421,8 +1718,19 @@ public sealed class LtfsWriterService
     private async ValueTask<LtfsIndex> ReadIndexAtAsync(string operationId, LtfsLocation location, LtfsWriterOptions options, CancellationToken cancellationToken)
     {
         Publish(operationId, LtfsWriterStepKind.ReadStarted, $"Read LTFS index at {location.Partition}{location.StartBlock}.");
-        await device.LocateAsync(location.Partition, location.StartBlock, cancellationToken).ConfigureAwait(false);
-        var payload = await device.ReadToFilemarkAsync(options.BlockSizeBytes, cancellationToken).ConfigureAwait(false);
+        byte[] payload;
+        try
+        {
+            await device.LocateAsync(location.Partition, location.StartBlock, cancellationToken).ConfigureAwait(false);
+            payload = await device.ReadToFilemarkAsync(options.BlockSizeBytes, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (IsEncryptionRelated(ex))
+        {
+            await ApplyEncryptionAsync(operationId, options, cancellationToken).ConfigureAwait(false);
+            await device.LocateAsync(location.Partition, location.StartBlock, cancellationToken).ConfigureAwait(false);
+            payload = await device.ReadToFilemarkAsync(options.BlockSizeBytes, cancellationToken).ConfigureAwait(false);
+        }
+
         using var stream = new MemoryStream(payload, writable: false);
         return LtfsSchemaReader.Read(stream);
     }
@@ -1503,7 +1811,7 @@ public sealed class LtfsWriterService
             };
         }
 
-        return kind is LtfsWriterErrorKind.EndOfMedium or LtfsWriterErrorKind.VolumeOverflow
+        return kind is LtfsWriterErrorKind.EarlyWarningEndOfMedium or LtfsWriterErrorKind.EndOfMedium or LtfsWriterErrorKind.VolumeOverflow
             ? LtfsWriterPolicyDecision.Abort("End of medium or volume overflow reached.")
             : LtfsWriterPolicyDecision.Abort("No LTFS error policy handler is configured.");
     }
@@ -1523,8 +1831,12 @@ public sealed class LtfsWriterService
     {
         if (exception is LtfsScsiCommandException scsi)
         {
+            if (scsi.WriteProtected)
+                return LtfsWriterErrorKind.WriteProtected;
             if (scsi.VolumeOverflow)
                 return LtfsWriterErrorKind.VolumeOverflow;
+            if (scsi.EarlyWarningEndOfMedium)
+                return LtfsWriterErrorKind.EarlyWarningEndOfMedium;
             if (scsi.EndOfMedium)
                 return LtfsWriterErrorKind.EndOfMedium;
             return scsi.TransportOk ? LtfsWriterErrorKind.ScsiCheckCondition : LtfsWriterErrorKind.Transport;
@@ -1539,8 +1851,21 @@ public sealed class LtfsWriterService
         };
     }
 
-    private async ValueTask ReleaseDriveAsync(bool removalPrevented, bool reserved)
+    private async ValueTask ReleaseDriveAsync(bool removalPrevented, bool reserved, LtfsWriterOptions options)
     {
+        var encryption = options.Encryption ?? new LtfsEncryptionOptions();
+        if (encryption.ClearDeviceKeyOnRelease && device is ILtfsEncryptionCapableDevice encryptionDevice)
+        {
+            try
+            {
+                await encryptionDevice.SetEncryptionAsync(null, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to clear LTFS encryption key during cleanup.");
+            }
+        }
+
         if (removalPrevented)
         {
             try
@@ -1564,6 +1889,14 @@ public sealed class LtfsWriterService
                 Log.Warning(ex, "Failed to release LTFS drive during cleanup.");
             }
         }
+    }
+
+    private static bool IsEncryptionRelated(Exception exception)
+    {
+        if (exception is LtfsScsiCommandException scsi)
+            return scsi.AdditionalSenseCode == 0x74 || (scsi.WriteProtected && scsi.AdditionalSenseCode is 0x2A or 0x74);
+
+        return exception.InnerException is not null && IsEncryptionRelated(exception.InnerException);
     }
 
     private static async ValueTask ReadExactlyAsync(Stream stream, Memory<byte> buffer, CancellationToken cancellationToken)
@@ -1682,6 +2015,15 @@ public sealed class LtfsWriterService
         if (autosave.RetainLastPerVolume < 0)
             throw new ArgumentOutOfRangeException(nameof(options), "LTFS autosave retention cannot be negative.");
 
+        var appendValidation = options.AppendValidation ?? new LtfsAppendValidationOptions();
+        var eomPolicy = options.EomPolicy ?? new LtfsEomPolicyOptions();
+        var wormPolicy = options.WormPolicy ?? new LtfsWormPolicyOptions();
+        var capacityPolicy = options.CapacityPolicy ?? new LtfsCapacityPolicyOptions();
+        if (capacityPolicy.SafetyReserveBytes < 0)
+            throw new ArgumentOutOfRangeException(nameof(options), "LTFS capacity safety reserve cannot be negative.");
+        if (capacityPolicy.CompressionRatioEstimate <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options), "LTFS capacity compression ratio estimate must be greater than zero.");
+
         return options with
         {
             CheckpointPolicy = options.CheckpointPolicy ?? new LtfsCheckpointPolicy(),
@@ -1691,6 +2033,10 @@ public sealed class LtfsWriterService
             HealthSampling = healthSampling,
             Encryption = encryption,
             Autosave = autosave,
+            AppendValidation = appendValidation,
+            EomPolicy = eomPolicy,
+            WormPolicy = wormPolicy,
+            CapacityPolicy = capacityPolicy,
         };
     }
 
@@ -1701,6 +2047,8 @@ public sealed class LtfsWriterService
             resolved = resolved with { BlockSizeBytes = label.BlockSize };
         return ValidateOptions(resolved);
     }
+
+    public static LtfsWriterOptions ResolvePublicOptions(LtfsWriterOptions? options, LtfsLabel? label = null) => ResolveOptions(options, label);
 
     private static void ValidateWriteRequest(LtfsWriteRequest request, LtfsWriterOptions options)
     {
@@ -1770,7 +2118,9 @@ public sealed class LtfsWriterService
         long BytesWritten,
         long FilesWritten,
         LtfsIndexCounters Counters,
-        bool DataPartitionIndexWritten);
+        bool DataPartitionIndexWritten,
+        LtfsWriteCompletionKind CompletionKind = LtfsWriteCompletionKind.Completed,
+        LtfsRemainingManifest? RemainingManifest = null);
 
     private sealed class LtfsWritePolicyContext
     {
@@ -1801,6 +2151,10 @@ public sealed class LtfsWriterService
         public long LastHealthSampleBytes { get; set; }
 
         public string OperationId { get; }
+
+        public bool EndOfMediumStopRequested { get; set; }
+
+        public string? EndOfMediumReason { get; set; }
     }
 
     private sealed class LtfsTapeBlockWriteStream : Stream
@@ -2190,7 +2544,7 @@ public sealed class FileSystemLtfsReadSink : ILtfsReadSink, IAsyncDisposable
     private sealed record VerificationState(LtfsHashAlgorithmKind Algorithm, string Expected, LtfsFileHashSet HashSet);
 }
 
-public sealed class ScsiLtfsWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCapableDevice
+public sealed class ScsiLtfsWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCapableDevice, ILtfsMetadataExportDevice
 {
     private readonly IScsiDrive drive;
 
@@ -2278,6 +2632,14 @@ public sealed class ScsiLtfsWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCap
     public ValueTask<LtfsTapePosition> ReadPositionAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (ReadPositionCommand.TryExecute(drive, new ReadPositionCommand(ReadPositionServiceAction.LongForm), out var longResult, out var longResponse)
+            && longResult.IsGood
+            && longResponse.LongForm is { } longForm
+            && longForm.LogicalObjectNumberValid)
+        {
+            return ValueTask.FromResult(new LtfsTapePosition(FromPartitionNumber((byte)Math.Min(longForm.PartitionNumber, byte.MaxValue)), longForm.BlockNumber, longForm.FileNumber));
+        }
+
         Ensure(ReadPositionCommand.TryExecute(drive, new ReadPositionCommand(ReadPositionServiceAction.ShortForm), out var result, out var response), result, "READ POSITION failed.");
         var shortForm = response.ShortForm ?? throw new InvalidOperationException("READ POSITION short form response was not parseable.");
         return ValueTask.FromResult(new LtfsTapePosition(FromPartitionNumber(shortForm.PartitionNumber), shortForm.FirstBlockLocation));
@@ -2381,6 +2743,17 @@ public sealed class ScsiLtfsWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCap
         return ValueTask.CompletedTask;
     }
 
+    public ValueTask<IReadOnlyList<MamAttribute>> ReadMamAttributesAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Ensure(ReadAttributeCommand.TryExecute(
+            drive,
+            new ReadAttributeCommand(ServiceAction: 0, VolumeNumber: 0, PartitionNumber: 0, FirstAttributeId: 0, AllocationLength: ushort.MaxValue),
+            out var result,
+            out var data), result, "READ ATTRIBUTE failed.");
+        return ValueTask.FromResult<IReadOnlyList<MamAttribute>>(ParseMamAttributes(data));
+    }
+
     private static bool IsFilemark(ScsiCommandResult result)
     {
         return result.SenseData.Length >= 3 && (result.SenseData[2] & 0x80) != 0;
@@ -2389,6 +2762,31 @@ public sealed class ScsiLtfsWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCap
     private static byte ToPartitionNumber(LtfsPartition partition) => partition == LtfsPartition.A ? (byte)0 : (byte)1;
 
     private static LtfsPartition FromPartitionNumber(byte partition) => partition == 0 ? LtfsPartition.A : LtfsPartition.B;
+
+    private static IReadOnlyList<MamAttribute> ParseMamAttributes(ReadOnlySpan<byte> data)
+    {
+        var attributes = new List<MamAttribute>();
+        var offset = data.Length >= 4 ? 4 : 0;
+        while (offset + 5 <= data.Length)
+        {
+            var id = ScsiCdbWriter.ReadUInt16BigEndian(data, offset);
+            var flags = data[offset + 2];
+            var length = ScsiCdbWriter.ReadUInt16BigEndian(data, offset + 3);
+            var valueOffset = offset + 5;
+            var next = valueOffset + length;
+            if (next > data.Length)
+                break;
+
+            attributes.Add(new MamAttribute(
+                id,
+                (MamAttributeFormat)(flags & 0x03),
+                data.Slice(valueOffset, length).ToArray(),
+                (flags & 0x80) != 0));
+            offset = next;
+        }
+
+        return attributes;
+    }
 
     private static void Ensure(bool transportOk, ScsiCommandResult result, string message)
     {
