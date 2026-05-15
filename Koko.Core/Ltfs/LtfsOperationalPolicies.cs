@@ -5,6 +5,7 @@ using System.IO.Compression;
 
 using Koko.Core.Events;
 using Koko.Core.Scsi.Commands;
+using Koko.Core.Scsi.Parsers;
 
 namespace Koko.Core.Ltfs;
 
@@ -68,7 +69,7 @@ public sealed record LtfsWriterPolicyDecisionEvent(
 public sealed class LtfsScsiCommandException : Exception
 {
     public LtfsScsiCommandException(string message, bool transportOk, ScsiCommandResult result)
-        : base($"{message} SCSI status=0x{result.ScsiStatus:X2} sense={Convert.ToHexString(result.SenseData)}.")
+        : base(FormatMessage(message, result))
     {
         TransportOk = transportOk;
         Result = result;
@@ -96,6 +97,14 @@ public sealed class LtfsScsiCommandException : Exception
     public byte AdditionalSenseCodeQualifier => SenseData.Length >= 14 ? SenseData[13] : (byte)0;
 
     public bool EarlyWarningEndOfMedium => EndOfMedium && SenseKey == 0x00 && AdditionalSenseCode == 0x00 && AdditionalSenseCodeQualifier == 0x02;
+
+    private static string FormatMessage(string message, ScsiCommandResult result)
+    {
+        var transport = result.TransportError is null
+            ? string.Empty
+            : $"\ntransport error={result.TransportError.ErrorCode}: {result.TransportError.Message}";
+        return $"{message} SCSI status=0x{result.ScsiStatus:X2}{transport}\nparsed sense={SenseParser.ParseSense(result.SenseData)}\nsense={Convert.ToHexString(result.SenseData)}.";
+    }
 
     public bool WriteProtected => SenseKey == 0x07;
 }

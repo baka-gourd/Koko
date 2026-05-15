@@ -1,7 +1,5 @@
 using System.Collections.Concurrent;
 
-using Koko.Core.Scsi;
-
 namespace Koko.Core;
 
 public class DriveSessionManager

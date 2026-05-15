@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.Text;
 
 using Koko.Core.Events;
@@ -106,6 +105,18 @@ public interface ILtfsWormDetectionDevice
     ValueTask<LogSenseResponse> ReadLogSenseAsync(LogPageCode pageCode, CancellationToken cancellationToken = default);
 }
 
+public sealed record LtfsPartitionModeSense(
+    byte MaxExtraPartitionCount,
+    byte AdditionalPartitionsDefined,
+    long? CurrentBlockLengthBytes,
+    byte[] Raw,
+    byte[] PageData);
+
+public interface ILtfsModeSenseDevice
+{
+    ValueTask<LtfsPartitionModeSense> ReadPartitionModeSenseAsync(CancellationToken cancellationToken = default);
+}
+
 public sealed class LtfsFormatService
 {
     public const string DestructiveConfirmationToken = "FORMAT_LTFS";
@@ -132,36 +143,45 @@ public sealed class LtfsFormatService
 
         var removalPrevented = false;
         var reserved = false;
+        var executor = new LtfsTapeCommandExecutor();
+        bool? detectedWorm;
+        bool effectiveWorm;
         try
         {
-            Publish(operationId, LtfsFormatStepKind.Preflight, "Reserve drive and validate media state.");
-            await device.ReserveAsync(cancellationToken).ConfigureAwait(false);
-            reserved = true;
-            await device.PreventRemovalAsync(true, cancellationToken).ConfigureAwait(false);
-            removalPrevented = true;
-            await device.TestUnitReadyAsync(cancellationToken).ConfigureAwait(false);
+            using (ScsiStartupUnitAttentionRetry.SuppressPowerOnReset(scopeName: "LTFS format preflight"))
+            {
+                Publish(operationId, LtfsFormatStepKind.Preflight, "Reserve drive and validate media state.");
+                await ExecuteFormatCommandAsync(executor, LtfsTapeCommandKind.ReserveDrive, ct => device.ReserveAsync(ct), cancellationToken, LtfsTapeBarrierKind.SessionBarrier, affectsPosition: false).ConfigureAwait(false);
+                reserved = true;
+                await ExecuteFormatCommandAsync(executor, LtfsTapeCommandKind.PreventRemoval, ct => device.PreventRemovalAsync(true, ct), cancellationToken, LtfsTapeBarrierKind.SessionBarrier, affectsPosition: false).ConfigureAwait(false);
+                removalPrevented = true;
+                await ExecuteFormatCommandAsync(executor, LtfsTapeCommandKind.TestUnitReady, ct => device.TestUnitReadyAsync(ct), cancellationToken, LtfsTapeBarrierKind.SessionBarrier, affectsPosition: false).ConfigureAwait(false);
 
-            var maxBlockSize = await device.ReadMaximumBlockSizeAsync(cancellationToken).ConfigureAwait(false);
-            if (request.BlockSizeBytes > maxBlockSize)
-                throw new InvalidOperationException($"Requested LTFS block size {request.BlockSizeBytes} exceeds drive limit {maxBlockSize}.");
+                var maxBlockSize = await device.ReadMaximumBlockSizeAsync(cancellationToken).ConfigureAwait(false);
+                if (request.BlockSizeBytes > maxBlockSize)
+                    throw new InvalidOperationException($"Requested LTFS block size {request.BlockSizeBytes} exceeds drive limit {maxBlockSize}.");
 
-            var maxExtraPartitions = await device.ReadMaximumExtraPartitionCountAsync(cancellationToken).ConfigureAwait(false);
-            if (request.PartitionMode == LtfsPartitionMode.TwoPartition && maxExtraPartitions < 1)
-                throw new InvalidOperationException("Two-partition LTFS format requires at least one extra partition.");
+                if (request.PartitionMode == LtfsPartitionMode.TwoPartition)
+                {
+                    var maxExtraPartitions = await device.ReadMaximumExtraPartitionCountAsync(cancellationToken).ConfigureAwait(false);
+                    if (maxExtraPartitions < 1)
+                        throw new InvalidOperationException("Two-partition LTFS format requires at least one extra partition.");
+                }
 
-            var detectedWorm = await DetectWormAsync(cancellationToken).ConfigureAwait(false);
-            var effectiveWorm = request.Worm || detectedWorm == true;
+                detectedWorm = await DetectWormAsync(cancellationToken).ConfigureAwait(false);
+                effectiveWorm = request.Worm || detectedWorm == true;
+            }
 
-            if (!effectiveWorm)
+            if (!effectiveWorm && request.PartitionMode == LtfsPartitionMode.TwoPartition)
             {
                 Publish(operationId, LtfsFormatStepKind.Preflight, $"Set capacity proportion {request.Capacity}.");
-                await device.SetCapacityAsync(request.Capacity, cancellationToken).ConfigureAwait(false);
+                await ExecuteFormatCommandAsync(executor, LtfsTapeCommandKind.SetCapacity, ct => device.SetCapacityAsync(request.Capacity, ct), cancellationToken, affectsPosition: false).ConfigureAwait(false);
             }
 
             if (!effectiveWorm)
             {
                 Publish(operationId, LtfsFormatStepKind.FormatMedium, "Initialize medium.");
-                await device.FormatMediumAsync(formatCode: 0, cancellationToken).ConfigureAwait(false);
+                await ExecuteFormatCommandAsync(executor, LtfsTapeCommandKind.FormatMedium, ct => device.FormatMediumAsync(formatCode: 0, ct), cancellationToken, affectsPosition: false).ConfigureAwait(false);
             }
             else
             {
@@ -171,30 +191,31 @@ public sealed class LtfsFormatService
             if (request.PartitionMode == LtfsPartitionMode.TwoPartition)
             {
                 Publish(operationId, LtfsFormatStepKind.PartitionMedium, "Configure and format two-partition LTFS layout.");
-                await device.ConfigureTwoPartitionAsync(request.P0Size, request.P1Size, cancellationToken).ConfigureAwait(false);
-                await device.FormatMediumAsync(formatCode: 1, cancellationToken).ConfigureAwait(false);
+                await ExecuteFormatCommandAsync(executor, LtfsTapeCommandKind.ConfigurePartition, ct => device.ConfigureTwoPartitionAsync(request.P0Size, request.P1Size, ct), cancellationToken, affectsPosition: false).ConfigureAwait(false);
+                await ExecuteFormatCommandAsync(executor, LtfsTapeCommandKind.FormatMedium, ct => device.FormatMediumAsync(formatCode: 1, ct), cancellationToken, affectsPosition: false).ConfigureAwait(false);
             }
 
             Publish(operationId, LtfsFormatStepKind.WriteMam, "Write LTFS application MAM attributes.");
-            await WriteApplicationMamAsync(request, cancellationToken).ConfigureAwait(false);
+            await WriteApplicationMamAsync(request, executor, cancellationToken).ConfigureAwait(false);
 
             Publish(operationId, LtfsFormatStepKind.Preflight, $"Set variable block size limit {request.BlockSizeBytes}.");
-            await device.SetBlockSizeAsync(request.BlockSizeBytes, cancellationToken).ConfigureAwait(false);
+            await ExecuteFormatCommandAsync(executor, LtfsTapeCommandKind.SetBlockSize, ct => device.SetBlockSizeAsync(request.BlockSizeBytes, ct), cancellationToken, affectsPosition: false).ConfigureAwait(false);
             await ApplyEncryptionAsync(operationId, request, cancellationToken).ConfigureAwait(false);
 
             var formatTime = LtfsIndex.FormatLtfsTime(DateTimeOffset.UtcNow);
             var volumeUuid = request.VolumeUuid ?? Guid.NewGuid();
-            var label = CreateLabel(request, volumeUuid, formatTime, LtfsPartition.B);
+            var dataPartition = request.PartitionMode == LtfsPartitionMode.PartitionlessLegacy ? LtfsPartition.A : LtfsPartition.B;
+            var label = CreateLabel(request, volumeUuid, formatTime, dataPartition);
 
             Publish(operationId, LtfsFormatStepKind.WriteDataPartitionLabel, "Write data partition VOL1 and LTFS label.");
-            await WritePartitionPreambleAsync(LtfsPartition.B, label, request.Barcode, twoFilemarksAfterLabel: true, cancellationToken).ConfigureAwait(false);
+            await WritePartitionPreambleAsync(dataPartition, label, request.Barcode, twoFilemarksAfterLabel: true, executor, cancellationToken).ConfigureAwait(false);
 
-            var dataIndexBlock = (await device.ReadPositionAsync(cancellationToken).ConfigureAwait(false)).Block;
-            var dataIndex = CreateInitialIndex(request, label, LtfsPartition.B, dataIndexBlock, previous: null);
+            var dataIndexBlock = (await ReadPositionAsync(executor, cancellationToken).ConfigureAwait(false)).Block;
+            var dataIndex = CreateInitialIndex(request, label, dataPartition, dataIndexBlock, previous: null);
 
-            Publish(operationId, LtfsFormatStepKind.WriteDataPartitionIndex, $"Write initial data partition index at B{dataIndexBlock}.");
-            await WriteIndexAsync(dataIndex, cancellationToken).ConfigureAwait(false);
-            await device.WriteFilemarksAsync(1, cancellationToken).ConfigureAwait(false);
+            Publish(operationId, LtfsFormatStepKind.WriteDataPartitionIndex, $"Write initial data partition index at {dataPartition}{dataIndexBlock}.");
+            await WriteIndexAsync(dataIndex, executor, cancellationToken).ConfigureAwait(false);
+            await WriteFilemarksAsync(executor, 1, cancellationToken).ConfigureAwait(false);
 
             ulong? indexPartitionIndexBlock = null;
             var finalIndex = dataIndex;
@@ -202,17 +223,17 @@ public sealed class LtfsFormatService
             {
                 label.LocationPartition = LtfsPartition.A;
                 Publish(operationId, LtfsFormatStepKind.WriteIndexPartitionLabel, "Write index partition VOL1 and LTFS label.");
-                await WritePartitionPreambleAsync(LtfsPartition.A, label, request.Barcode, twoFilemarksAfterLabel: false, cancellationToken).ConfigureAwait(false);
+                await WritePartitionPreambleAsync(LtfsPartition.A, label, request.Barcode, twoFilemarksAfterLabel: false, executor, cancellationToken).ConfigureAwait(false);
 
                 if (request.WriteInitialIndexPartition && !effectiveWorm)
                 {
-                    await device.WriteFilemarksAsync(1, cancellationToken).ConfigureAwait(false);
-                    indexPartitionIndexBlock = (await device.ReadPositionAsync(cancellationToken).ConfigureAwait(false)).Block;
+                    await WriteFilemarksAsync(executor, 1, cancellationToken).ConfigureAwait(false);
+                    indexPartitionIndexBlock = (await ReadPositionAsync(executor, cancellationToken).ConfigureAwait(false)).Block;
                     finalIndex = CreateInitialIndex(request, label, LtfsPartition.A, indexPartitionIndexBlock.Value, dataIndex.Location);
 
                     Publish(operationId, LtfsFormatStepKind.WriteIndexPartitionIndex, $"Write initial index partition copy at A{indexPartitionIndexBlock}.");
-                    await WriteIndexAsync(finalIndex, cancellationToken).ConfigureAwait(false);
-                    await device.WriteFilemarksAsync(1, cancellationToken).ConfigureAwait(false);
+                    await WriteIndexAsync(finalIndex, executor, cancellationToken).ConfigureAwait(false);
+                    await WriteFilemarksAsync(executor, 1, cancellationToken).ConfigureAwait(false);
                 }
             }
 
@@ -222,7 +243,7 @@ public sealed class LtfsFormatService
                 Publish(operationId, LtfsFormatStepKind.WriteVci, "Write volume coherency information.");
                 try
                 {
-                    await WriteVciAsync(finalIndex.GenerationNumber, indexPartitionIndexBlock, dataIndexBlock, finalIndex.VolumeUuid, cancellationToken).ConfigureAwait(false);
+                    await WriteVciAsync(finalIndex.GenerationNumber, indexPartitionIndexBlock, dataPartition, dataIndexBlock, finalIndex.VolumeUuid, executor, cancellationToken).ConfigureAwait(false);
                     vciWritten = true;
                 }
                 catch (Exception ex) when (effectiveWorm && (request.WormPolicy ?? new LtfsWormPolicyOptions()).AllowVciFailureWarning && ex is not OperationCanceledException)
@@ -244,9 +265,9 @@ public sealed class LtfsFormatService
         {
             await ClearEncryptionOnReleaseAsync(request).ConfigureAwait(false);
             if (removalPrevented)
-                await device.PreventRemovalAsync(false, CancellationToken.None).ConfigureAwait(false);
+                await ExecuteFormatCommandAsync(executor, LtfsTapeCommandKind.AllowRemoval, ct => device.PreventRemovalAsync(false, ct), CancellationToken.None, affectsPosition: false).ConfigureAwait(false);
             if (reserved)
-                await device.ReleaseAsync(CancellationToken.None).ConfigureAwait(false);
+                await ExecuteFormatCommandAsync(executor, LtfsTapeCommandKind.ReleaseDrive, ct => device.ReleaseAsync(ct), CancellationToken.None, LtfsTapeBarrierKind.SessionBarrier, affectsPosition: false).ConfigureAwait(false);
         }
     }
 
@@ -255,8 +276,8 @@ public sealed class LtfsFormatService
         if (string.IsNullOrWhiteSpace(request.VolumeName))
             throw new ArgumentException("Volume name is required.", nameof(request));
 
-        if (request.PartitionMode != LtfsPartitionMode.TwoPartition)
-            throw new NotSupportedException("Only two-partition LTFS format is implemented in this phase.");
+        if (request.PartitionMode is not LtfsPartitionMode.TwoPartition and not LtfsPartitionMode.PartitionlessLegacy)
+            throw new NotSupportedException($"LTFS partition mode {request.PartitionMode} is not implemented.");
 
         if (request.BlockSizeBytes <= 0 || request.BlockSizeBytes > int.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(request), "Block size must be greater than zero and fit a SCSI transfer buffer.");
@@ -277,8 +298,9 @@ public sealed class LtfsFormatService
     {
         var formatTime = LtfsIndex.FormatLtfsTime(DateTimeOffset.UtcNow);
         var volumeUuid = request.VolumeUuid ?? Guid.Empty;
-        var label = CreateLabel(request, volumeUuid, formatTime, LtfsPartition.B);
-        var index = CreateInitialIndex(request, label, LtfsPartition.B, 0, previous: null);
+        var dataPartition = request.PartitionMode == LtfsPartitionMode.PartitionlessLegacy ? LtfsPartition.A : LtfsPartition.B;
+        var label = CreateLabel(request, volumeUuid, formatTime, dataPartition);
+        var index = CreateInitialIndex(request, label, dataPartition, 0, previous: null);
         Publish(operationId, LtfsFormatStepKind.Completed, "LTFS format dry run completed.");
         return new LtfsFormatResult(label, index, 0, null, VciWritten: false, DryRun: true);
     }
@@ -288,23 +310,24 @@ public sealed class LtfsFormatService
         LtfsLabel label,
         string? barcode,
         bool twoFilemarksAfterLabel,
+        LtfsTapeCommandExecutor executor,
         CancellationToken cancellationToken)
     {
-        await device.LocateAsync(partition, 0, cancellationToken).ConfigureAwait(false);
-        await device.WriteBlockAsync(LtfsVol1Label.Create(barcode), cancellationToken).ConfigureAwait(false);
-        await device.WriteFilemarksAsync(1, cancellationToken).ConfigureAwait(false);
-        await device.WriteBlockAsync(LtfsLabelWriter.ToArray(label), cancellationToken).ConfigureAwait(false);
-        await device.WriteFilemarksAsync(twoFilemarksAfterLabel ? 2u : 1u, cancellationToken).ConfigureAwait(false);
+        await LocateAsync(executor, partition, 0, cancellationToken).ConfigureAwait(false);
+        await WriteBlockAsync(executor, LtfsVol1Label.Create(barcode), cancellationToken).ConfigureAwait(false);
+        await WriteFilemarksAsync(executor, 1, cancellationToken).ConfigureAwait(false);
+        await WriteBlockAsync(executor, LtfsLabelWriter.ToArray(label), cancellationToken).ConfigureAwait(false);
+        await WriteFilemarksAsync(executor, twoFilemarksAfterLabel ? 2u : 1u, cancellationToken).ConfigureAwait(false);
     }
 
-    private async ValueTask WriteIndexAsync(LtfsIndex index, CancellationToken cancellationToken)
+    private async ValueTask WriteIndexAsync(LtfsIndex index, LtfsTapeCommandExecutor executor, CancellationToken cancellationToken)
     {
         using var stream = new MemoryStream();
         LtfsSchemaWriter.Write(stream, index, new LtfsSchemaWriterOptions(LeaveOpen: true));
-        await device.WriteBlockAsync(stream.ToArray(), cancellationToken).ConfigureAwait(false);
+        await WriteBlockAsync(executor, stream.ToArray(), cancellationToken).ConfigureAwait(false);
     }
 
-    private async ValueTask WriteApplicationMamAsync(LtfsFormatRequest request, CancellationToken cancellationToken)
+    private async ValueTask WriteApplicationMamAsync(LtfsFormatRequest request, LtfsTapeCommandExecutor executor, CancellationToken cancellationToken)
     {
         var attributes = new List<MamAttribute>
         {
@@ -317,7 +340,83 @@ public sealed class LtfsFormatService
             TextAttribute(0x080B, LtfsLabel.DefaultVersion, 16),
         };
 
-        await device.WriteMamAttributesAsync(LtfsPartition.A, attributes, cancellationToken).ConfigureAwait(false);
+        await ExecuteFormatCommandAsync(executor, LtfsTapeCommandKind.WriteMamAttributes, ct => device.WriteMamAttributesAsync(LtfsPartition.A, attributes, ct), cancellationToken, affectsPosition: false).ConfigureAwait(false);
+    }
+
+    private async ValueTask ExecuteFormatCommandAsync(
+        LtfsTapeCommandExecutor executor,
+        LtfsTapeCommandKind kind,
+        Func<CancellationToken, ValueTask> action,
+        CancellationToken cancellationToken,
+        LtfsTapeBarrierKind barrier = LtfsTapeBarrierKind.HardBarrier,
+        bool affectsPosition = true)
+    {
+        var queue = new LtfsTapeCommandQueue();
+        queue.Enqueue(new LtfsTapeCommand(kind, action, LtfsTapeCommandPriority.Control, barrier, AffectsPosition: affectsPosition, ReadPositionAsync: ct => device.ReadPositionAsync(ct)));
+        await executor.ExecuteAsync(queue, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask LocateAsync(LtfsTapeCommandExecutor executor, LtfsPartition partition, ulong block, CancellationToken cancellationToken)
+    {
+        var target = new LtfsTapePosition(partition, block);
+        var queue = new LtfsTapeCommandQueue();
+        queue.Enqueue(new LtfsTapeCommand(
+            LtfsTapeCommandKind.LocateBlock,
+            ct => device.LocateAsync(partition, block, ct),
+            LtfsTapeCommandPriority.Control,
+            LtfsTapeBarrierKind.HardBarrier,
+            ExpectedEndPosition: target,
+            ReadPositionAsync: ct => device.ReadPositionAsync(ct)));
+        await executor.ExecuteAsync(queue, cancellationToken).ConfigureAwait(false);
+        executor.SetExpectedPosition(target);
+    }
+
+    private async ValueTask<LtfsTapePosition> ReadPositionAsync(LtfsTapeCommandExecutor executor, CancellationToken cancellationToken)
+    {
+        LtfsTapePosition? position = null;
+        var queue = new LtfsTapeCommandQueue();
+        queue.Enqueue(new LtfsTapeCommand(
+            LtfsTapeCommandKind.ReadPosition,
+            async ct => position = await device.ReadPositionAsync(ct).ConfigureAwait(false),
+            LtfsTapeCommandPriority.Control,
+            LtfsTapeBarrierKind.HardBarrier,
+            AffectsPosition: false,
+            ReadPositionAsync: ct => device.ReadPositionAsync(ct)));
+        await executor.ExecuteAsync(queue, cancellationToken).ConfigureAwait(false);
+        if (position is null)
+            throw new InvalidOperationException("LTFS format READ POSITION did not return a position.");
+        executor.SetExpectedPosition(position);
+        return position;
+    }
+
+    private async ValueTask WriteBlockAsync(LtfsTapeCommandExecutor executor, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+    {
+        var start = executor.ExpectedPosition;
+        var queue = new LtfsTapeCommandQueue();
+        queue.Enqueue(new LtfsTapeCommand(
+            LtfsTapeCommandKind.WriteDataBlock,
+            ct => device.WriteBlockAsync(data, ct),
+            LtfsTapeCommandPriority.Data,
+            LtfsTapeBarrierKind.None,
+            ExpectedStartPosition: start,
+            ExpectedEndPosition: start is null ? null : start with { Block = start.Block + 1 },
+            ReadPositionAsync: ct => device.ReadPositionAsync(ct)));
+        await executor.ExecuteAsync(queue, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask WriteFilemarksAsync(LtfsTapeCommandExecutor executor, uint count, CancellationToken cancellationToken)
+    {
+        var start = executor.ExpectedPosition;
+        var queue = new LtfsTapeCommandQueue();
+        queue.Enqueue(new LtfsTapeCommand(
+            LtfsTapeCommandKind.WriteFilemark,
+            ct => device.WriteFilemarksAsync(count, ct),
+            LtfsTapeCommandPriority.Control,
+            LtfsTapeBarrierKind.HardBarrier,
+            ExpectedStartPosition: start,
+            ExpectedEndPosition: start is null ? null : start with { Block = start.Block + count },
+            ReadPositionAsync: ct => device.ReadPositionAsync(ct)));
+        await executor.ExecuteAsync(queue, cancellationToken).ConfigureAwait(false);
     }
 
     private async ValueTask ApplyEncryptionAsync(string operationId, LtfsFormatRequest request, CancellationToken cancellationToken)
@@ -409,34 +508,48 @@ public sealed class LtfsFormatService
     private async ValueTask WriteVciAsync(
         ulong generation,
         ulong? indexPartitionBlock,
+        LtfsPartition dataPartition,
         ulong dataPartitionBlock,
         Guid volumeUuid,
+        LtfsTapeCommandExecutor executor,
         CancellationToken cancellationToken)
     {
-        await device.WriteMamAttributesAsync(
-            LtfsPartition.B,
-            [new LtfsVolumeCoherencyInformation(generation, dataPartitionBlock, volumeUuid).ToMamAttribute()],
-            cancellationToken).ConfigureAwait(false);
+        await ExecuteFormatCommandAsync(
+            executor,
+            LtfsTapeCommandKind.WriteVolumeCoherencyInformation,
+            ct => device.WriteMamAttributesAsync(
+                dataPartition,
+                [new LtfsVolumeCoherencyInformation(generation, dataPartitionBlock, volumeUuid).ToMamAttribute()],
+                ct),
+            cancellationToken,
+            affectsPosition: false).ConfigureAwait(false);
 
         if (indexPartitionBlock is { } block)
         {
-            await device.WriteMamAttributesAsync(
-                LtfsPartition.A,
-                [new LtfsVolumeCoherencyInformation(generation, block, volumeUuid).ToMamAttribute()],
-                cancellationToken).ConfigureAwait(false);
+            await ExecuteFormatCommandAsync(
+                executor,
+                LtfsTapeCommandKind.WriteVolumeCoherencyInformation,
+                ct => device.WriteMamAttributesAsync(
+                    LtfsPartition.A,
+                    [new LtfsVolumeCoherencyInformation(generation, block, volumeUuid).ToMamAttribute()],
+                    ct),
+                cancellationToken,
+                affectsPosition: false).ConfigureAwait(false);
         }
     }
 
     private static LtfsLabel CreateLabel(LtfsFormatRequest request, Guid volumeUuid, string formatTime, LtfsPartition location)
     {
+        var dataPartition = request.PartitionMode == LtfsPartitionMode.PartitionlessLegacy ? LtfsPartition.A : LtfsPartition.B;
+        var indexPartition = request.PartitionMode == LtfsPartitionMode.PartitionlessLegacy ? dataPartition : LtfsPartition.A;
         return new LtfsLabel
         {
             Creator = request.Creator,
             FormatTime = formatTime,
             VolumeUuid = volumeUuid,
             LocationPartition = location,
-            IndexPartition = LtfsPartition.A,
-            DataPartition = LtfsPartition.B,
+            IndexPartition = indexPartition,
+            DataPartition = dataPartition,
             BlockSize = request.BlockSizeBytes,
             Compression = request.CompressionEnabled,
         };
@@ -456,7 +569,7 @@ public sealed class LtfsFormatService
             GenerationNumber = 1,
             UpdateTime = label.FormatTime,
             Location = new LtfsLocation { Partition = locationPartition, StartBlock = startBlock },
-            PreviousGenerationLocation = previous?.Clone() ?? new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 0 },
+            PreviousGenerationLocation = previous?.Clone() ?? new LtfsLocation { Partition = label.DataPartition, StartBlock = 0 },
             HighestFileUid = 1,
         };
 
@@ -485,7 +598,7 @@ public sealed class LtfsFormatService
     }
 }
 
-public sealed class ScsiLtfsFormatDevice : ILtfsFormatDevice, ILtfsEncryptionCapableDevice, ILtfsWormDetectionDevice
+public sealed class ScsiLtfsFormatDevice : ILtfsFormatDevice, ILtfsEncryptionCapableDevice, ILtfsWormDetectionDevice, ILtfsModeSenseDevice
 {
     private readonly IScsiDrive drive;
 
@@ -535,14 +648,13 @@ public sealed class ScsiLtfsFormatDevice : ILtfsFormatDevice, ILtfsEncryptionCap
 
     public ValueTask<byte> ReadMaximumExtraPartitionCountAsync(CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        Ensure(ModeSenseCommand.TryExecute(
-            drive,
-            new ModeSenseCommand(false, false, ModePageControl.CurrentValues, 0x11, 0, 12),
-            out var result,
-            out var data), result, "MODE SENSE partition page failed.");
+        return ReadMaximumExtraPartitionCountCoreAsync(cancellationToken);
+    }
 
-        return ValueTask.FromResult(data.Length >= 3 ? data[2] : (byte)0);
+    private async ValueTask<byte> ReadMaximumExtraPartitionCountCoreAsync(CancellationToken cancellationToken)
+    {
+        var modeSense = await ReadPartitionModeSenseAsync(cancellationToken).ConfigureAwait(false);
+        return modeSense.MaxExtraPartitionCount;
     }
 
     public ValueTask SetCapacityAsync(ushort capacity, CancellationToken cancellationToken = default)
@@ -552,15 +664,11 @@ public sealed class ScsiLtfsFormatDevice : ILtfsFormatDevice, ILtfsEncryptionCap
         return ValueTask.CompletedTask;
     }
 
-    public ValueTask ConfigureTwoPartitionAsync(ushort p0Size, ushort p1Size, CancellationToken cancellationToken = default)
+    public async ValueTask ConfigureTwoPartitionAsync(ushort p0Size, ushort p1Size, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        Ensure(ModeSenseCommand.TryExecute(
-            drive,
-            new ModeSenseCommand(false, false, ModePageControl.CurrentValues, 0x11, 0, 12),
-            out var senseResult,
-            out var modeData), senseResult, "MODE SENSE partition page failed.");
-
+        var modeSense = await ReadPartitionModeSenseAsync(cancellationToken).ConfigureAwait(false);
+        var modeData = modeSense.PageData.ToArray();
         Array.Resize(ref modeData, Math.Max(modeData.Length, 12));
         var parameterList = new byte[]
         {
@@ -575,7 +683,30 @@ public sealed class ScsiLtfsFormatDevice : ILtfsFormatDevice, ILtfsEncryptionCap
             drive,
             new ModeSelectCommand(false, true, false, parameterList),
             out var selectResult), selectResult, "MODE SELECT partition page failed.");
-        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask<LtfsPartitionModeSense> ReadPartitionModeSenseAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Ensure(ModeSenseCommand.TryExecute(
+            drive,
+            new ModeSenseCommand(false, false, ModePageControl.CurrentValues, 0x11, 0, 64),
+            out var result,
+            out var data), result, "MODE SENSE partition page failed.");
+
+        var modeSense = ModeSenseDataParser.Parse6(data);
+        return ValueTask.FromResult(ToLtfsPartitionModeSense(modeSense));
+    }
+
+    public static LtfsPartitionModeSense ToLtfsPartitionModeSense(ModeSenseData modeSense)
+    {
+        var page = modeSense.PageData;
+        return new LtfsPartitionModeSense(
+            page.Length >= 3 ? page[2] : (byte)0,
+            page.Length >= 4 ? page[3] : (byte)0,
+            modeSense.CurrentBlockLengthBytes,
+            modeSense.Raw,
+            page);
     }
 
     public ValueTask FormatMediumAsync(byte formatCode, CancellationToken cancellationToken = default)

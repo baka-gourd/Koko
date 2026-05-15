@@ -6,7 +6,8 @@ public enum LtfsReadOperation
 {
     VerifyOnly,
     ExtractOnly,
-    ExtractAndVerify
+    ExtractAndVerify,
+    UpdateOnly
 }
 
 public enum LtfsSliceDelivery

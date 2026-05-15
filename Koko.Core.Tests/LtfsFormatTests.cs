@@ -7,6 +7,25 @@ namespace Koko.Core.Tests;
 public sealed class LtfsFormatTests
 {
     [Test]
+    public async Task Mode_sense_parser_skips_header_and_block_descriptor()
+    {
+        var raw = new byte[]
+        {
+            19, 0, 0, 8,
+            0x5A, 0, 0, 0, 0, 0x08, 0x00, 0x00,
+            0x11, 0x0A, 3, 1, 0, 0, 0, 0, 0, 1, 0xFF, 0xFF
+        };
+
+        var modeSense = ModeSenseDataParser.Parse6(raw);
+        var partition = ScsiLtfsFormatDevice.ToLtfsPartitionModeSense(modeSense);
+
+        await Assert.That(partition.CurrentBlockLengthBytes).IsEqualTo(524288L);
+        await Assert.That(partition.MaxExtraPartitionCount).IsEqualTo((byte)3);
+        await Assert.That(partition.AdditionalPartitionsDefined).IsEqualTo((byte)1);
+        await Assert.That(partition.PageData[0]).IsEqualTo((byte)0x11);
+    }
+
+    [Test]
     public async Task Format_two_partition_ltfs_writes_expected_layout_index_and_vci()
     {
         var device = new RecordingFormatDevice();
@@ -74,10 +93,70 @@ public sealed class LtfsFormatTests
         await Assert.That(device.Blocks.ContainsKey((LtfsPartition.A, 5))).IsFalse();
     }
 
+    [Test]
+    public async Task Format_partitionless_legacy_writes_single_partition_layout()
+    {
+        var device = new RecordingFormatDevice { MaximumExtraPartitionCount = 0 };
+        var service = new LtfsFormatService(device);
+        var uuid = Guid.Parse("44aa1d1a-af29-44d4-a731-c9317222531e");
+
+        var result = await service.FormatAsync(new LtfsFormatRequest(
+            VolumeName: "LTO4VOL",
+            Barcode: "LTO4",
+            VolumeUuid: uuid,
+            PartitionMode: LtfsPartitionMode.PartitionlessLegacy,
+            DestructiveConfirmationToken: LtfsFormatService.DestructiveConfirmationToken));
+
+        await Assert.That(result.DataPartitionIndexBlock).IsEqualTo(5UL);
+        await Assert.That(result.IndexPartitionIndexBlock).IsNull();
+        await Assert.That(result.Index.Location.Partition).IsEqualTo(LtfsPartition.A);
+        await Assert.That(result.Index.PreviousGenerationLocation.Partition).IsEqualTo(LtfsPartition.A);
+
+        var label = ReadLabel(device.Blocks[(LtfsPartition.A, 2)].Data);
+        await Assert.That(label.LocationPartition).IsEqualTo(LtfsPartition.A);
+        await Assert.That(label.IndexPartition).IsEqualTo(LtfsPartition.A);
+        await Assert.That(label.DataPartition).IsEqualTo(LtfsPartition.A);
+
+        await Assert.That(string.Join("|", device.Events)).IsEqualTo(
+            "Reserve|Prevent:True|TestUnitReady|ReadMaximumBlockSize|Format:0|WriteMam:A:7|SetBlockSize:524288|Locate:A:0|WriteBlock:A:0:VOL1|Filemarks:A:1:1|WriteBlock:A:2:ltfslabel|Filemarks:A:3:2|ReadPosition:A:5|WriteBlock:A:5:ltfsindex|Filemarks:A:6:1|WriteMam:A:1|Prevent:False|Release");
+
+        await Assert.That(device.Mam.ContainsKey((LtfsPartition.B, 0x080C))).IsFalse();
+        await Assert.That(LtfsVolumeCoherencyInformation.TryParse(device.Mam[(LtfsPartition.A, 0x080C)].AsSpan(), out var vci)).IsTrue();
+        await Assert.That(vci.IndexBlock).IsEqualTo(5UL);
+        await Assert.That(vci.VolumeUuid).IsEqualTo(uuid);
+    }
+
+    [Test]
+    public async Task Format_two_partition_requires_extra_partition_but_partitionless_does_not()
+    {
+        var twoPartitionDevice = new RecordingFormatDevice { MaximumExtraPartitionCount = 0 };
+        var service = new LtfsFormatService(twoPartitionDevice);
+
+        await Assert.That(async () => await service.FormatAsync(new LtfsFormatRequest(
+            VolumeName: "TWOPART",
+            DestructiveConfirmationToken: LtfsFormatService.DestructiveConfirmationToken))).ThrowsException();
+
+        var partitionlessDevice = new RecordingFormatDevice { MaximumExtraPartitionCount = 0 };
+        var result = await new LtfsFormatService(partitionlessDevice).FormatAsync(new LtfsFormatRequest(
+            VolumeName: "LTO4VOL",
+            PartitionMode: LtfsPartitionMode.PartitionlessLegacy,
+            DestructiveConfirmationToken: LtfsFormatService.DestructiveConfirmationToken));
+
+        await Assert.That(result.Index.Location.Partition).IsEqualTo(LtfsPartition.A);
+        await Assert.That(string.Join("|", partitionlessDevice.Events)).DoesNotContain("ReadMaximumExtraPartitionCount");
+        await Assert.That(string.Join("|", partitionlessDevice.Events)).DoesNotContain("ConfigureTwoPartition");
+    }
+
     private static LtfsIndex ReadIndex(byte[] data)
     {
         using var stream = new MemoryStream(data);
         return LtfsSchemaReader.Read(stream);
+    }
+
+    private static LtfsLabel ReadLabel(byte[] data)
+    {
+        using var stream = new MemoryStream(data);
+        return LtfsLabelReader.Read(stream);
     }
 
     private sealed record RecordedBlock(string Kind, byte[] Data);
@@ -102,6 +181,7 @@ public sealed class LtfsFormatTests
         public List<string> Events { get; } = [];
         public Dictionary<(LtfsPartition Partition, ulong Block), RecordedBlock> Blocks { get; } = [];
         public Dictionary<(LtfsPartition Partition, ushort Id), byte[]> Mam { get; } = [];
+        public byte MaximumExtraPartitionCount { get; init; } = 1;
 
         public ValueTask ReserveAsync(CancellationToken cancellationToken = default)
         {
@@ -136,7 +216,7 @@ public sealed class LtfsFormatTests
         public ValueTask<byte> ReadMaximumExtraPartitionCountAsync(CancellationToken cancellationToken = default)
         {
             Events.Add("ReadMaximumExtraPartitionCount");
-            return ValueTask.FromResult((byte)1);
+            return ValueTask.FromResult(MaximumExtraPartitionCount);
         }
 
         public ValueTask SetCapacityAsync(ushort capacity, CancellationToken cancellationToken = default)

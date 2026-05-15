@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-using Koko.Core.Scsi;
+using Serilog;
 
 namespace Koko.Core.Scsi.Commands;
 
@@ -17,22 +17,29 @@ internal static class ScsiCommandExecutor
         if (drive is null) throw new ArgumentNullException(nameof(drive));
         if (allocationLength < 0) throw new ArgumentOutOfRangeException(nameof(allocationLength));
 
-        data = allocationLength == 0 ? Array.Empty<byte>() : new byte[allocationLength];
-        var sense = new byte[IOControl.DefaultSenseLength];
+        var retryCount = 0;
+        while (true)
+        {
+            data = allocationLength == 0 ? Array.Empty<byte>() : new byte[allocationLength];
+            var sense = new byte[IOControl.DefaultSenseLength];
 
-        var ok = drive.ScsiRead(
-            commandBlock: cdb,
-            returnBuffer: data,
-            timeoutSeconds: timeoutSeconds,
-            out var scsiStatus,
-            out var bytesReturned,
-            senseBuffer: sense);
+            var ok = drive.ScsiRead(
+                commandBlock: cdb,
+                returnBuffer: data,
+                timeoutSeconds: timeoutSeconds,
+                out var scsiStatus,
+                out var bytesReturned,
+                senseBuffer: sense);
 
-        if (bytesReturned < (uint)data.Length)
-            Array.Resize(ref data, (int)bytesReturned);
+            if (bytesReturned < (uint)data.Length)
+                Array.Resize(ref data, (int)bytesReturned);
 
-        result = ScsiCommandResult.From(ok, scsiStatus, bytesReturned, sense);
-        return ok;
+            result = ScsiCommandResult.From(ok, scsiStatus, bytesReturned, sense, drive.LastTransportError);
+            if (!ShouldRetry(cdb, result, retryCount))
+                return ok;
+
+            retryCount++;
+        }
     }
 
     public static bool TryExecuteRead(
@@ -44,17 +51,24 @@ internal static class ScsiCommandExecutor
     {
         if (drive is null) throw new ArgumentNullException(nameof(drive));
 
-        var sense = new byte[IOControl.DefaultSenseLength];
-        var ok = drive.ScsiRead(
-            commandBlock: cdb,
-            returnBuffer: dataBuffer,
-            timeoutSeconds: timeoutSeconds,
-            out var scsiStatus,
-            out var bytesReturned,
-            senseBuffer: sense);
+        var retryCount = 0;
+        while (true)
+        {
+            var sense = new byte[IOControl.DefaultSenseLength];
+            var ok = drive.ScsiRead(
+                commandBlock: cdb,
+                returnBuffer: dataBuffer,
+                timeoutSeconds: timeoutSeconds,
+                out var scsiStatus,
+                out var bytesReturned,
+                senseBuffer: sense);
 
-        result = ScsiCommandResult.From(ok, scsiStatus, bytesReturned, sense);
-        return ok;
+            result = ScsiCommandResult.From(ok, scsiStatus, bytesReturned, sense, drive.LastTransportError);
+            if (!ShouldRetry(cdb, result, retryCount))
+                return ok;
+
+            retryCount++;
+        }
     }
 
     public static bool TryExecuteWrite(
@@ -70,17 +84,24 @@ internal static class ScsiCommandExecutor
             ? Span<byte>.Empty
             : GetWritableSpan(dataOut);
 
-        var sense = new byte[IOControl.DefaultSenseLength];
-        var ok = drive.ScsiWrite(
-            commandBlock: cdb,
-            dataBuffer: dataSpan,
-            timeoutSeconds: timeoutSeconds,
-            out var scsiStatus,
-            out var bytesReturned,
-            senseBuffer: sense);
+        var retryCount = 0;
+        while (true)
+        {
+            var sense = new byte[IOControl.DefaultSenseLength];
+            var ok = drive.ScsiWrite(
+                commandBlock: cdb,
+                dataBuffer: dataSpan,
+                timeoutSeconds: timeoutSeconds,
+                out var scsiStatus,
+                out var bytesReturned,
+                senseBuffer: sense);
 
-        result = ScsiCommandResult.From(ok, scsiStatus, bytesReturned, sense);
-        return ok;
+            result = ScsiCommandResult.From(ok, scsiStatus, bytesReturned, sense, drive.LastTransportError);
+            if (!ShouldRetry(cdb, result, retryCount))
+                return ok;
+
+            retryCount++;
+        }
     }
 
     public static bool TryExecuteNoData(
@@ -92,17 +113,24 @@ internal static class ScsiCommandExecutor
     {
         if (drive is null) throw new ArgumentNullException(nameof(drive));
 
-        var sense = new byte[IOControl.DefaultSenseLength];
-        var ok = drive.ScsiCommand(
-            commandBlock: cdb,
-            dataDirection: direction,
-            timeout: timeoutSeconds,
-            out var scsiStatus,
-            out var bytesReturned,
-            senseBuffer: sense);
+        var retryCount = 0;
+        while (true)
+        {
+            var sense = new byte[IOControl.DefaultSenseLength];
+            var ok = drive.ScsiCommand(
+                commandBlock: cdb,
+                dataDirection: direction,
+                timeout: timeoutSeconds,
+                out var scsiStatus,
+                out var bytesReturned,
+                senseBuffer: sense);
 
-        result = ScsiCommandResult.From(ok, scsiStatus, bytesReturned, sense);
-        return ok;
+            result = ScsiCommandResult.From(ok, scsiStatus, bytesReturned, sense, drive.LastTransportError);
+            if (!ShouldRetry(cdb, result, retryCount))
+                return ok;
+
+            retryCount++;
+        }
     }
 
     private static Span<byte> GetWritableSpan(ReadOnlyMemory<byte> data)
@@ -111,5 +139,19 @@ internal static class ScsiCommandExecutor
             return segment.Array.AsSpan(segment.Offset, segment.Count);
 
         return data.ToArray().AsSpan();
+    }
+
+    private static bool ShouldRetry(ReadOnlySpan<byte> cdb, ScsiCommandResult result, int retryCount)
+    {
+        if (!ScsiStartupUnitAttentionRetry.ShouldRetryPowerOnReset(result, retryCount))
+            return false;
+
+        Log.Information(
+            "Suppressing startup UNIT ATTENTION power-on reset and retrying SCSI command. Scope={ScopeName}, Opcode=0x{Opcode:X2}, Attempt={Attempt}, MaxRetries={MaxRetries}",
+            ScsiStartupUnitAttentionRetry.CurrentScopeName,
+            cdb.Length == 0 ? (byte)0 : cdb[0],
+            retryCount + 1,
+            ScsiStartupUnitAttentionRetry.CurrentMaxRetries);
+        return true;
     }
 }

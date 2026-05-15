@@ -58,12 +58,11 @@ public partial class MainWindow : Window
             SetBusy("Refreshing SCSI tape drives");
             DriveComboBox.Items.Clear();
 
-            var drives = SetupAPI.ListDevices("SCSI")
-                .Where(x => x.ClassName is not null && x.ClassName.Equals("TapeDrive", StringComparison.InvariantCultureIgnoreCase))
-                .Where(x => !string.IsNullOrWhiteSpace(x.PhysicalDeviceObjectName))
+            var drives = SetupAPI.ListTapeDeviceInterfaces()
+                .Where(x => !string.IsNullOrWhiteSpace(x.DevicePath))
                 .Select(x => new DebugDriveItem(
-                    x.Name ?? x.Description ?? x.PhysicalDeviceObjectName!,
-                    x.PhysicalDeviceObjectName!))
+                    x.DevicePath,
+                    x.DevicePath))
                 .ToList();
 
             foreach (var drive in drives)
@@ -94,10 +93,12 @@ public partial class MainWindow : Window
 
         try
         {
-            SetBusy($"Reading index partition from {selected.DisplayName}");
-            var index = await Task.Run(() => ReadIndexPartitionSchema(selected.DevicePath));
-            DisplayIndex(index, selected.DisplayName);
-            AppendLog($"Read index partition schema from {selected.DevicePath}");
+            SetBusy($"Discovering LTFS schema from {selected.DisplayName}");
+            var result = await Task.Run(() => ReadIndexPartitionSchema(selected.DevicePath));
+            DisplayIndex(result.Index, $"{selected.DisplayName} ({result.Source})");
+            AppendLog($"Discovered LTFS schema from {selected.DevicePath}. Source={result.Source}, append={result.AppendPoint.Partition}{result.AppendPoint.Block}, dirty={result.DirtyAppendDetected}, blocksize={result.Label?.BlockSize ?? 0}.");
+            foreach (var warning in result.Warnings)
+                AppendLog($"WARN: {warning}");
         }
         catch (Exception ex)
         {
@@ -109,9 +110,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private static async Task<LtfsIndex> ReadIndexPartitionSchema(string physicalDeviceObjectName)
+    private static async Task<LtfsVolumeDiscoveryResult> ReadIndexPartitionSchema(string devicePath)
     {
-        using var session = LtfsScsiServiceSession.OpenByPhysicalDeviceObjectName(physicalDeviceObjectName);
+        using var session = LtfsScsiServiceSession.OpenByPath(devicePath);
         var device = session.WriterDevice;
 
         await device.ReserveAsync();
@@ -119,13 +120,9 @@ public partial class MainWindow : Window
         try
         {
             await device.PreventRemovalAsync(true);
-            removalPrevented = true;
             await device.TestUnitReadyAsync();
-            await device.SetBlockSizeAsync(LtfsSequentialReadPlanOptions.Default.LtfsBlockSizeBytes);
-
-            var schemaPayload = await TryReadCurrentIndexPartitionPayloadAsync(device);
-            using var stream = new MemoryStream(schemaPayload, writable: false);
-            return LtfsSchemaReader.Read(stream);
+            removalPrevented = true;
+            return await new LtfsVolumeDiscoveryService(device).DiscoverAsync();
         }
         finally
         {
@@ -133,53 +130,6 @@ public partial class MainWindow : Window
                 await device.PreventRemovalAsync(false);
             await device.ReleaseAsync();
         }
-    }
-
-    private static async Task<byte[]> TryReadCurrentIndexPartitionPayloadAsync(ScsiLtfsWriterDevice device)
-    {
-        var attempts = new (string Name, Func<Task<byte[]>> Read)[]
-        {
-            ("index partition filemark 3", async () =>
-            {
-                await device.LocateFilemarkAsync(LtfsPartition.A, 3);
-                return await device.ReadToFilemarkAsync(LtfsSequentialReadPlanOptions.Default.LtfsBlockSizeBytes);
-            }),
-            ("initial index partition block 5", async () =>
-            {
-                await device.LocateAsync(LtfsPartition.A, 5);
-                return await device.ReadToFilemarkAsync(LtfsSequentialReadPlanOptions.Default.LtfsBlockSizeBytes);
-            }),
-            ("data partition filemark before EOD fallback", async () =>
-            {
-                await device.LocateEndOfDataAsync(LtfsPartition.B);
-                throw new NotSupportedException("EOD fallback needs SPACE -2 filemarks and is intentionally not enabled in this debug action yet.");
-            }),
-        };
-
-        var errors = new List<string>();
-        foreach (var attempt in attempts)
-        {
-            try
-            {
-                var payload = await attempt.Read();
-                if (payload.Length > 0 && LooksLikeLtfsIndex(payload))
-                    return payload;
-
-                errors.Add($"{attempt.Name}: payload did not look like ltfsindex ({payload.Length} bytes).");
-            }
-            catch (Exception ex)
-            {
-                errors.Add($"{attempt.Name}: {ex.Message}");
-            }
-        }
-
-        throw new InvalidOperationException("Could not read an LTFS index from the selected tape. " + string.Join(" ", errors));
-    }
-
-    private static bool LooksLikeLtfsIndex(byte[] payload)
-    {
-        var text = System.Text.Encoding.UTF8.GetString(payload);
-        return text.Contains("<ltfsindex", StringComparison.Ordinal);
     }
 
     private void DisplayIndex(LtfsIndex index, string source)

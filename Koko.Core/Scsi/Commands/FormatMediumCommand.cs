@@ -1,5 +1,3 @@
-using Koko.Core.Scsi;
-
 namespace Koko.Core.Scsi.Commands;
 
 public readonly record struct FormatMediumCommand(
@@ -26,7 +24,7 @@ public readonly record struct FormatMediumCommand(
         return ScsiCommandExecutor.TryExecuteNoData(
             drive,
             cdb,
-            DataDirection.Unspecified,
+            DataDirection.In,
             request.TimeoutSeconds,
             out result);
     }

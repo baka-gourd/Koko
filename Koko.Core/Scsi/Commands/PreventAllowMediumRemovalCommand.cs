@@ -1,5 +1,3 @@
-using Koko.Core.Scsi;
-
 namespace Koko.Core.Scsi.Commands;
 
 public readonly record struct PreventAllowMediumRemovalCommand(
@@ -20,7 +18,7 @@ public readonly record struct PreventAllowMediumRemovalCommand(
         return ScsiCommandExecutor.TryExecuteNoData(
             drive,
             cdb,
-            DataDirection.Unspecified,
+            DataDirection.In,
             request.TimeoutSeconds,
             out result);
     }

@@ -1,5 +1,3 @@
-using Koko.Core.Scsi;
-
 namespace Koko.Core.Scsi.Commands;
 
 public enum SpaceCode : byte
@@ -40,7 +38,7 @@ public readonly record struct SpaceCommand(
             return ScsiCommandExecutor.TryExecuteNoData(
                 drive,
                 cdb,
-                DataDirection.Unspecified,
+                DataDirection.In,
                 request.TimeoutSeconds,
                 out result);
         }
@@ -56,7 +54,7 @@ public readonly record struct SpaceCommand(
         return ScsiCommandExecutor.TryExecuteNoData(
             drive,
             cdb16,
-            DataDirection.Unspecified,
+            DataDirection.In,
             request.TimeoutSeconds,
             out result);
     }

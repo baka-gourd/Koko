@@ -1,5 +1,3 @@
-using System.Text;
-
 using Windows.Win32;
 using Windows.Win32.Devices.DeviceAndDriverInstallation;
 

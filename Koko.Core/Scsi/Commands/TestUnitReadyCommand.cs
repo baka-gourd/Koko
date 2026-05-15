@@ -1,5 +1,3 @@
-using Koko.Core.Scsi;
-
 namespace Koko.Core.Scsi.Commands;
 
 public readonly record struct TestUnitReadyCommand(
@@ -18,7 +16,10 @@ public readonly record struct TestUnitReadyCommand(
         return ScsiCommandExecutor.TryExecuteNoData(
             drive,
             cdb,
-            DataDirection.Unspecified,
+            // Match legacy LTFSCopyGUI: TUR is sent through the read path with
+            // a zero-length buffer. Some Windows tape drivers reject
+            // PASS_THROUGH_DIRECT + zero transfer + UNSPECIFIED as ERROR_INVALID_PARAMETER.
+            DataDirection.In,
             request.TimeoutSeconds,
             out result);
     }

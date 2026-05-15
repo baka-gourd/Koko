@@ -1,5 +1,3 @@
-using Koko.Core.Scsi;
-
 namespace Koko.Core.Scsi.Commands;
 
 public readonly record struct RewindCommand(
@@ -21,7 +19,7 @@ public readonly record struct RewindCommand(
         return ScsiCommandExecutor.TryExecuteNoData(
             drive,
             cdb,
-            DataDirection.Unspecified,
+            DataDirection.In,
             request.TimeoutSeconds,
             out result);
     }

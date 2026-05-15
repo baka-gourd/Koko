@@ -6,6 +6,8 @@ public abstract class DriveBase : IScsiDrive, IDisposable
 {
     public virtual int BlockSizeLimit { get; set; }
 
+    public virtual ScsiTransportError? LastTransportError { get; protected set; }
+
     public abstract bool ScsiRead(ReadOnlySpan<byte> commandBlock, Span<byte> returnBuffer, uint timeoutSeconds,
         out byte scsiStatus,
         out uint bytesReturned, Span<byte> senseBuffer);

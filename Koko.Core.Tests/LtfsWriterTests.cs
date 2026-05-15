@@ -111,7 +111,7 @@ public sealed class LtfsWriterTests
     }
 
     [Test]
-    public async Task Write_default_policies_do_not_add_health_telemetry_between_data_blocks()
+    public async Task Write_default_policies_sample_health_after_file_boundary()
     {
         var device = new RecordingWriterDevice { Position = new LtfsTapePosition(LtfsPartition.B, 10) };
         var data = Encoding.ASCII.GetBytes("abcdefghijklmnop");
@@ -122,7 +122,7 @@ public sealed class LtfsWriterTests
             [new LtfsWriteSource("large.bin", data.Length, _ => ValueTask.FromResult<Stream>(new MemoryStream(data, writable: false)), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch)],
             new LtfsWriterOptions(BlockSizeBytes: 8, WriteDataPartitionIndexOnComplete: false, RefreshIndexPartitionOnComplete: false, WriteVci: false)));
 
-        await Assert.That(string.Join("|", device.Events)).IsEqualTo("Reserve|Prevent:True|TestUnitReady|SetBlockSize:8|LocateEOD:B|ReadPosition:B:10|WriteBlock:B:10:8|WriteBlock:B:11:8|Prevent:False|Release");
+        await Assert.That(string.Join("|", device.Events)).IsEqualTo("Reserve|Prevent:True|TestUnitReady|SetBlockSize:8|LocateEOD:B|ReadPosition:B:10|WriteBlock:B:10:8|WriteBlock:B:11:8|LogSense:0x02|Prevent:False|Release");
     }
 
     [Test]
@@ -130,6 +130,7 @@ public sealed class LtfsWriterTests
     {
         var device = new RecordingWriterDevice { Position = new LtfsTapePosition(LtfsPartition.B, 10) };
         var data = Encoding.ASCII.GetBytes("abcdefgh");
+        var second = Encoding.ASCII.GetBytes("ijklmnop");
         var healthEvents = new List<LtfsWriteHealthPolicyEvent>();
         var bus = new KokoEventBus();
         using var subscription = bus.Subscribe<LtfsWriteHealthPolicyEvent>(healthEvents.Add);
@@ -137,7 +138,10 @@ public sealed class LtfsWriterTests
         var result = await new LtfsWriterService(device, bus).WriteFilesAsync(new LtfsWriteRequest(
             CreateIndex(),
             CreateIndex().RootDirectory!,
-            [new LtfsWriteSource("reload.bin", data.Length, _ => ValueTask.FromResult<Stream>(new MemoryStream(data, writable: false)), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch)],
+            [
+                new LtfsWriteSource("reload-1.bin", data.Length, _ => ValueTask.FromResult<Stream>(new MemoryStream(data, writable: false)), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch),
+                new LtfsWriteSource("reload-2.bin", second.Length, _ => ValueTask.FromResult<Stream>(new MemoryStream(second, writable: false)), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch),
+            ],
             new LtfsWriterOptions(
                 BlockSizeBytes: 8,
                 WriteDataPartitionIndexOnComplete: false,
@@ -147,15 +151,53 @@ public sealed class LtfsWriterTests
                     Enabled: true,
                     LowSpeedMiBPerSecond: 0,
                     HighSpeedMiBPerSecond: double.MaxValue,
-                    SustainedDuration: TimeSpan.Zero),
+                    SustainedDuration: TimeSpan.Zero,
+                    ReloadAfterFlushCount: 1),
                 HealthSampling: new LtfsHealthSamplingOptions(
                     CustomSampler: (_, _, _) => ValueTask.FromResult<double?>(0)))));
 
         var eventTrace = string.Join("|", device.Events);
         await Assert.That(result.DataPartitionIndexWritten).IsTrue();
-        await Assert.That(healthEvents.Single().Action).IsEqualTo(LtfsWriteHealthAction.Reload);
-        await Assert.That(eventTrace).Contains("WriteBlock:B:10:8|Filemarks:B:11:1|ReadPosition:B:12|WriteBlock:B:12:");
-        await Assert.That(eventTrace).Contains("|Filemarks:B:100:0|LoadUnload:False|LoadUnload:True|TestUnitReady|SetBlockSize:8|LocateEOD:B|ReadPosition:B:100");
+        await Assert.That(healthEvents.Select(x => x.Action).ToArray()).IsEquivalentTo([
+            LtfsWriteHealthAction.Flush,
+            LtfsWriteHealthAction.PendingReload,
+            LtfsWriteHealthAction.Reload,
+        ]);
+        await Assert.That(eventTrace).Contains("WriteBlock:B:10:8|ReadPosition:B:11|LogSense:0x02|Filemarks:B:11:0|WriteBlock:B:11:8");
+        await Assert.That(eventTrace).Contains("Filemarks:B:12:1|ReadPosition:B:13|WriteBlock:B:13:");
+        await Assert.That(eventTrace).Contains("|Prevent:False|LoadUnload:False|LoadUnload:True|TestUnitReady|SetBlockSize:8|Prevent:True|LocateEOD:B|ReadPosition:B:");
+    }
+
+    [Test]
+    public async Task Health_monitor_flushes_twice_then_reloads_on_third_successful_flush()
+    {
+        var device = new RecordingWriterDevice();
+        var monitor = new LtfsWriteHealthMonitor(
+            new LtfsAutoReloadPolicyOptions(
+                Enabled: true,
+                LowSpeedMiBPerSecond: 0,
+                HighSpeedMiBPerSecond: double.MaxValue,
+                SustainedDuration: TimeSpan.Zero,
+                ReloadAfterFlushCount: 3),
+            new LtfsWriteErrorRateSampler(
+                device,
+                new LtfsHealthSamplingOptions(CustomSampler: (_, _, _) => ValueTask.FromResult<double?>(0))));
+
+        for (var i = 1; i <= 2; i++)
+        {
+            var flush = await monitor.SampleAsync("op", i * 1024 * 1024, CancellationToken.None);
+            await Assert.That(flush.Action).IsEqualTo(LtfsWriteHealthAction.Flush);
+            await Assert.That(monitor.RecordCapacityLossFlushSucceeded(flush)).IsNull();
+        }
+
+        var thirdFlush = await monitor.SampleAsync("op", 3 * 1024 * 1024, CancellationToken.None);
+        await Assert.That(thirdFlush.Action).IsEqualTo(LtfsWriteHealthAction.Flush);
+        var pending = monitor.RecordCapacityLossFlushSucceeded(thirdFlush);
+        await Assert.That(pending?.Action).IsEqualTo(LtfsWriteHealthAction.PendingReload);
+
+        var reload = monitor.TryConsumePendingReload();
+        await Assert.That(reload?.Action).IsEqualTo(LtfsWriteHealthAction.Reload);
+        await Assert.That(reload?.ReloadCount).IsEqualTo(1);
     }
 
     [Test]
@@ -193,11 +235,15 @@ public sealed class LtfsWriterTests
     {
         var device = new RecordingWriterDevice { Position = new LtfsTapePosition(LtfsPartition.B, 10) };
         var data = Encoding.ASCII.GetBytes("abcdefgh");
+        var second = Encoding.ASCII.GetBytes("ijklmnop");
 
         await new LtfsWriterService(device).WriteFilesAsync(new LtfsWriteRequest(
             CreateIndex(),
             CreateIndex().RootDirectory!,
-            [new LtfsWriteSource("encrypted.bin", data.Length, _ => ValueTask.FromResult<Stream>(new MemoryStream(data, writable: false)), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch)],
+            [
+                new LtfsWriteSource("encrypted-1.bin", data.Length, _ => ValueTask.FromResult<Stream>(new MemoryStream(data, writable: false)), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch),
+                new LtfsWriteSource("encrypted-2.bin", second.Length, _ => ValueTask.FromResult<Stream>(new MemoryStream(second, writable: false)), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch),
+            ],
             new LtfsWriterOptions(
                 BlockSizeBytes: 8,
                 WriteDataPartitionIndexOnComplete: false,
@@ -208,12 +254,13 @@ public sealed class LtfsWriterTests
                     Enabled: true,
                     LowSpeedMiBPerSecond: 0,
                     HighSpeedMiBPerSecond: double.MaxValue,
-                    SustainedDuration: TimeSpan.Zero),
+                    SustainedDuration: TimeSpan.Zero,
+                    ReloadAfterFlushCount: 1),
                 HealthSampling: new LtfsHealthSamplingOptions(CustomSampler: (_, _, _) => ValueTask.FromResult<double?>(0)))));
 
         var eventTrace = string.Join("|", device.Events);
         await Assert.That(eventTrace).StartsWith("Reserve|Prevent:True|TestUnitReady|SetEncryption:01020304|SetBlockSize:8|LocateEOD:B");
-        await Assert.That(eventTrace).Contains("LoadUnload:True|TestUnitReady|SetEncryption:01020304|SetBlockSize:8|LocateEOD:B");
+        await Assert.That(eventTrace).Contains("LoadUnload:True|TestUnitReady|SetEncryption:01020304|SetBlockSize:8|Prevent:True|LocateEOD:B");
     }
 
     [Test]
@@ -287,39 +334,44 @@ public sealed class LtfsWriterTests
     }
 
     [Test]
-    public async Task Discovery_loads_index_from_vci_and_reports_dirty_append()
+    public async Task Discovery_loads_two_partition_index_from_legacy_layout_and_reports_dirty_append()
     {
         var index = CreateIndex();
-        index.Location = new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 42 };
+        index.Location = new LtfsLocation { Partition = LtfsPartition.A, StartBlock = 5 };
+        index.PreviousGenerationLocation = new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 42 };
+        var label = CreateLabel(index.VolumeUuid, LtfsPartition.A);
         var device = new RecordingWriterDevice
         {
             Position = new LtfsTapePosition(LtfsPartition.B, 50),
             DataEodBlock = 50,
-            MamAttributes = [new LtfsVolumeCoherencyInformation(index.GenerationNumber, 42, index.VolumeUuid).ToMamAttribute()],
+            MamAttributes = [new LtfsVolumeCoherencyInformation(99, 99, index.VolumeUuid).ToMamAttribute()],
         };
-        device.IndexPayloads[(LtfsPartition.B, 42)] = WriteIndex(index);
+        SetupLegacyTwoPartition(device, label, index);
 
         var result = await new LtfsVolumeDiscoveryService(device).DiscoverAsync(writerOptions: new LtfsWriterOptions(BlockSizeBytes: 8));
 
         await Assert.That(result.Index.GenerationNumber).IsEqualTo(index.GenerationNumber);
-        await Assert.That(result.Source).IsEqualTo(LtfsIndexDiscoverySource.VciDataPartition);
+        await Assert.That(result.Source).IsEqualTo(LtfsIndexDiscoverySource.LabelLayout);
         await Assert.That(result.AppendPoint.Block).IsEqualTo(50UL);
         await Assert.That(result.DirtyAppendDetected).IsTrue();
-        await Assert.That(string.Join("|", device.Events)).Contains("Locate:B:42|ReadToFM:B:42|LocateEOD:B|ReadPosition:B:50");
+        await Assert.That(result.Graph).IsNull();
+        await Assert.That(string.Join("|", device.Events)).Contains("Locate:A:0|ReadBlock:A:0|LocateFM:A:1|ReadPosition:A:1|AdvanceFM:A:2|ReadPosition:A:2|ReadToFM:A:2|SetBlockSize:8|LocateFM:A:3|ReadPosition:A:4|AdvanceFM:A:5|ReadPosition:A:5|ReadToFM:A:5|LocateEOD:B|ReadPosition:B:50");
+        await Assert.That(string.Join("|", device.Events)).DoesNotContain("ReadMam");
     }
 
     [Test]
-    public async Task Discovery_applies_encryption_before_loading_vci_index()
+    public async Task Discovery_applies_encryption_before_legacy_probe()
     {
         var index = CreateIndex();
-        index.Location = new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 42 };
+        index.Location = new LtfsLocation { Partition = LtfsPartition.A, StartBlock = 5 };
+        index.PreviousGenerationLocation = new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 42 };
+        var label = CreateLabel(index.VolumeUuid, LtfsPartition.A);
         var device = new RecordingWriterDevice
         {
             Position = new LtfsTapePosition(LtfsPartition.B, 50),
             DataEodBlock = 50,
-            MamAttributes = [new LtfsVolumeCoherencyInformation(index.GenerationNumber, 42, index.VolumeUuid).ToMamAttribute()],
         };
-        device.IndexPayloads[(LtfsPartition.B, 42)] = WriteIndex(index);
+        SetupLegacyTwoPartition(device, label, index);
 
         var result = await new LtfsVolumeDiscoveryService(device).DiscoverAsync(
             writerOptions: new LtfsWriterOptions(
@@ -334,43 +386,93 @@ public sealed class LtfsWriterTests
     }
 
     [Test]
-    public async Task Discovery_fallback_scan_loads_data_checkpoint_when_vci_is_missing()
+    public async Task Discovery_options_do_not_select_scan_or_vci_strategy()
     {
         var index = CreateIndex();
-        index.Location = new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 42 };
+        index.Location = new LtfsLocation { Partition = LtfsPartition.A, StartBlock = 5 };
+        index.PreviousGenerationLocation = new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 42 };
+        var label = CreateLabel(index.VolumeUuid, LtfsPartition.A);
+
         var device = new RecordingWriterDevice
         {
             DataEodBlock = 43,
+            MamAttributes = [new LtfsVolumeCoherencyInformation(99, 99, index.VolumeUuid).ToMamAttribute()],
         };
-        device.Blocks[(LtfsPartition.B, 42)] = WriteIndex(index);
+        SetupLegacyTwoPartition(device, label, index);
 
         var result = await new LtfsVolumeDiscoveryService(device).DiscoverAsync(
-            new LtfsVolumeDiscoveryOptions(Mode: LtfsDiscoveryMode.Normal, NormalScanMaxBlocks: 48),
+            new LtfsVolumeDiscoveryOptions(),
             new LtfsWriterOptions(BlockSizeBytes: 8));
 
-        await Assert.That(result.Index.Location.StartBlock).IsEqualTo(42UL);
-        await Assert.That(result.Source).IsEqualTo(LtfsIndexDiscoverySource.DataCheckpointScan);
-        await Assert.That(result.Graph).IsNotNull();
+        await Assert.That(result.Source).IsEqualTo(LtfsIndexDiscoverySource.LabelLayout);
+        await Assert.That(string.Join("|", device.Events)).Contains("LocateFM:A:3|ReadPosition:A:4|AdvanceFM:A:5|ReadPosition:A:5|ReadToFM:A:5");
+        await Assert.That(string.Join("|", device.Events)).DoesNotContain("ReadMam");
     }
 
     [Test]
-    public async Task Discovery_rejects_lower_generation_when_newer_invalid_candidate_exists()
+    public async Task Discovery_loads_single_partition_index_from_previous_eod_filemark()
     {
-        var oldIndex = CreateIndex();
-        oldIndex.GenerationNumber = 2;
-        oldIndex.Location = new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 42 };
-        var badIndex = oldIndex.Clone();
-        badIndex.GenerationNumber = 3;
-        badIndex.HighestFileUid = 0;
-        badIndex.RootDirectory!.FileUid = 2;
-        badIndex.Location = new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 43 };
-        var device = new RecordingWriterDevice { DataEodBlock = 44 };
-        device.Blocks[(LtfsPartition.B, 42)] = WriteIndex(oldIndex);
-        device.Blocks[(LtfsPartition.B, 43)] = WriteIndex(badIndex);
+        var index = CreateIndex();
+        index.Location = new LtfsLocation { Partition = LtfsPartition.A, StartBlock = 5 };
+        index.PreviousGenerationLocation = new LtfsLocation { Partition = LtfsPartition.A, StartBlock = 0 };
+        var label = new LtfsLabel
+        {
+            VolumeUuid = index.VolumeUuid,
+            LocationPartition = LtfsPartition.A,
+            IndexPartition = LtfsPartition.A,
+            DataPartition = LtfsPartition.A,
+            BlockSize = 8,
+        };
+        var device = new RecordingWriterDevice { IndexEodBlock = 8, IndexEodFileNumber = 4 };
+        device.Blocks[(LtfsPartition.A, 0)] = LtfsVol1Label.Create("KOKO01");
+        device.FilemarkPayloadStarts[(LtfsPartition.A, 1)] = 2;
+        device.FilemarkPayloadStarts[(LtfsPartition.A, 3)] = 5;
+        device.IndexPayloads[(LtfsPartition.A, 2)] = LtfsLabelWriter.ToArray(label);
+        device.IndexPayloads[(LtfsPartition.A, 5)] = WriteIndex(index);
+
+        var result = await new LtfsVolumeDiscoveryService(device).DiscoverAsync(
+            new LtfsVolumeDiscoveryOptions(),
+            new LtfsWriterOptions(BlockSizeBytes: 8));
+
+        await Assert.That(result.Source).IsEqualTo(LtfsIndexDiscoverySource.DataCheckpointScan);
+        await Assert.That(result.AppendPoint.Block).IsEqualTo(8UL);
+        await Assert.That(string.Join("|", device.Events)).Contains("LocateEOD:A|ReadPosition:A:8|LocateFM:A:3|ReadPosition:A:4|AdvanceFM:A:5|ReadPosition:A:5|ReadToFM:A:5");
+    }
+
+    [Test]
+    public async Task Discovery_fails_immediately_when_vol1_is_invalid()
+    {
+        var index = CreateIndex();
+        var label = CreateLabel(index.VolumeUuid, LtfsPartition.A);
+        var device = new RecordingWriterDevice();
+        SetupLegacyTwoPartition(device, label, index);
+        device.Blocks[(LtfsPartition.A, 0)] = Encoding.ASCII.GetBytes("not-vol1");
 
         await Assert.That(async () => await new LtfsVolumeDiscoveryService(device).DiscoverAsync(
-            new LtfsVolumeDiscoveryOptions(Mode: LtfsDiscoveryMode.Normal, NormalScanMaxBlocks: 48),
+            new LtfsVolumeDiscoveryOptions(),
             new LtfsWriterOptions(BlockSizeBytes: 8))).ThrowsException();
+
+        await Assert.That(string.Join("|", device.Events)).DoesNotContain("LocateFM:A:1");
+    }
+
+    [Test]
+    public async Task Discovery_fails_like_legacy_when_index_partition_candidate_is_invalid()
+    {
+        var index = CreateIndex();
+        var label = CreateLabel(index.VolumeUuid, LtfsPartition.A);
+        var device = new RecordingWriterDevice
+        {
+            DataEodBlock = 44,
+            MamAttributes = [new LtfsVolumeCoherencyInformation(index.GenerationNumber, 42, index.VolumeUuid).ToMamAttribute()],
+        };
+        SetupLegacyTwoPartition(device, label, index);
+        device.IndexPayloads[(LtfsPartition.A, 5)] = Encoding.UTF8.GetBytes("<ltfsindex>");
+
+        await Assert.That(async () => await new LtfsVolumeDiscoveryService(device).DiscoverAsync(
+            new LtfsVolumeDiscoveryOptions(),
+            new LtfsWriterOptions(BlockSizeBytes: 8))).ThrowsException();
+
+        await Assert.That(string.Join("|", device.Events)).DoesNotContain("ReadMam");
     }
 
     [Test]
@@ -467,6 +569,121 @@ public sealed class LtfsWriterTests
     }
 
     [Test]
+    public async Task Tape_command_executor_tracks_position_and_reconciles_after_failure()
+    {
+        var queue = new LtfsTapeCommandQueue();
+        var realPosition = new LtfsTapePosition(LtfsPartition.B, 11);
+        queue.Enqueue(new LtfsTapeCommand(
+            LtfsTapeCommandKind.WriteDataBlock,
+            _ => throw new InvalidOperationException("position advanced"),
+            LtfsTapeCommandPriority.Data,
+            LtfsTapeBarrierKind.None,
+            ExpectedStartPosition: new LtfsTapePosition(LtfsPartition.B, 10),
+            ExpectedEndPosition: new LtfsTapePosition(LtfsPartition.B, 11),
+            ReadPositionAsync: _ => ValueTask.FromResult(realPosition)));
+
+        var executor = new LtfsTapeCommandExecutor();
+        executor.SetExpectedPosition(new LtfsTapePosition(LtfsPartition.B, 10));
+
+        await Assert.That(async () => await executor.ExecuteAsync(queue)).ThrowsException();
+        await Assert.That(executor.State).IsEqualTo(LtfsTapeCommandExecutorState.Faulted);
+        await Assert.That(executor.ExpectedPosition).IsEqualTo(realPosition);
+    }
+
+    [Test]
+    public async Task Tape_command_executor_applies_command_timeout()
+    {
+        var queue = new LtfsTapeCommandQueue();
+        queue.Enqueue(new LtfsTapeCommand(
+            LtfsTapeCommandKind.ReadPosition,
+            async ct => await Task.Delay(TimeSpan.FromSeconds(5), ct),
+            LtfsTapeCommandPriority.Telemetry,
+            LtfsTapeBarrierKind.None,
+            Timeout: TimeSpan.FromMilliseconds(10)));
+
+        await Assert.That(async () => await new LtfsTapeCommandExecutor().ExecuteAsync(queue)).ThrowsException();
+    }
+
+    [Test]
+    public async Task Tape_command_queue_coalesces_adjacent_data_blocks_into_run()
+    {
+        var executed = new List<string>();
+        var queue = new LtfsTapeCommandQueue();
+        queue.Enqueue(new LtfsTapeCommand(
+            LtfsTapeCommandKind.WriteDataBlock,
+            _ =>
+            {
+                executed.Add("first");
+                return ValueTask.CompletedTask;
+            },
+            LtfsTapeCommandPriority.Data,
+            LtfsTapeBarrierKind.None,
+            ExpectedStartPosition: new LtfsTapePosition(LtfsPartition.B, 10),
+            ExpectedEndPosition: new LtfsTapePosition(LtfsPartition.B, 11),
+            CanCoalesce: true));
+        queue.Enqueue(new LtfsTapeCommand(
+            LtfsTapeCommandKind.WriteDataBlock,
+            _ =>
+            {
+                executed.Add("second");
+                return ValueTask.CompletedTask;
+            },
+            LtfsTapeCommandPriority.Data,
+            LtfsTapeBarrierKind.None,
+            ExpectedStartPosition: new LtfsTapePosition(LtfsPartition.B, 11),
+            ExpectedEndPosition: new LtfsTapePosition(LtfsPartition.B, 12),
+            CanCoalesce: true));
+
+        await Assert.That(queue.Count).IsEqualTo(1);
+        var executor = new LtfsTapeCommandExecutor();
+        executor.SetExpectedPosition(new LtfsTapePosition(LtfsPartition.B, 10));
+        var results = await executor.ExecuteAsync(queue);
+
+        await Assert.That(results.Single().Command.Kind).IsEqualTo(LtfsTapeCommandKind.WriteDataRun);
+        await Assert.That(results.Single().Command.LogicalBlockCount).IsEqualTo(2);
+        await Assert.That(string.Join("|", executed)).IsEqualTo("first|second");
+        await Assert.That(executor.ExpectedPosition).IsEqualTo(new LtfsTapePosition(LtfsPartition.B, 12));
+    }
+
+    [Test]
+    public async Task Tape_command_queue_does_not_coalesce_across_checkpoint_boundary()
+    {
+        var queue = new LtfsTapeCommandQueue();
+        queue.Enqueue(new LtfsTapeCommand(
+            LtfsTapeCommandKind.WriteDataBlock,
+            _ => ValueTask.CompletedTask,
+            LtfsTapeCommandPriority.Data,
+            LtfsTapeBarrierKind.None,
+            CanCoalesce: true));
+        queue.Enqueue(new LtfsTapeCommand(
+            LtfsTapeCommandKind.WriteDataBlock,
+            _ => ValueTask.CompletedTask,
+            LtfsTapeCommandPriority.Data,
+            LtfsTapeBarrierKind.HardBarrier,
+            CanCoalesce: true));
+
+        await Assert.That(queue.Count).IsEqualTo(2);
+    }
+
+    [Test]
+    public async Task Tape_command_executor_blocks_data_when_position_is_uncertain()
+    {
+        var queue = new LtfsTapeCommandQueue();
+        queue.Enqueue(new LtfsTapeCommand(
+            LtfsTapeCommandKind.WriteDataBlock,
+            _ => ValueTask.CompletedTask,
+            LtfsTapeCommandPriority.Data,
+            LtfsTapeBarrierKind.None));
+
+        var executor = new LtfsTapeCommandExecutor();
+        executor.MarkBuffered("previous command may have moved tape");
+
+        await Assert.That(async () => await executor.ExecuteAsync(queue)).ThrowsException();
+        await Assert.That(executor.State).IsEqualTo(LtfsTapeCommandExecutorState.Faulted);
+        await Assert.That(executor.PositionUncertain).IsTrue();
+    }
+
+    [Test]
     public async Task Capacity_policy_stops_before_next_file_and_returns_remaining_manifest()
     {
         var device = new RecordingWriterDevice
@@ -513,7 +730,7 @@ public sealed class LtfsWriterTests
             [new LtfsWriteSource("worm.bin", data.Length, _ => ValueTask.FromResult<Stream>(new MemoryStream(data, writable: false)), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch)],
             new LtfsWriterOptions(BlockSizeBytes: 8, Discovery: new LtfsVolumeDiscoveryResult(index, null, new LtfsTapePosition(LtfsPartition.B, 10), LtfsIndexDiscoverySource.VciDataPartition, false, Worm: true, WriteProtected: false, []))));
 
-        await Assert.That(string.Join("|", device.Events)).Contains("LocateEOD:A|Filemarks:A:20:1");
+        await Assert.That(string.Join("|", device.Events)).Contains("LocateEOD:A|ReadPosition:A:20|Filemarks:A:20:1");
     }
 
     [Test]
@@ -644,14 +861,13 @@ public sealed class LtfsWriterTests
     }
 
     [Test]
-    public async Task Verify_prefers_blake3_over_other_enabled_hashes()
+    public async Task Verify_requires_all_enabled_present_hashes_to_match()
     {
         var data = Encoding.ASCII.GetBytes("verify-data");
         var device = new RecordingWriterDevice();
         device.Blocks[(LtfsPartition.B, 10)] = data;
         var file = new LtfsFile { Name = "verify.bin", FileUid = 2, Length = data.Length };
         file.Extents.Add(new LtfsExtent { Partition = LtfsPartition.B, StartBlock = 10, ByteOffset = 0, ByteCount = data.Length, FileOffset = 0 });
-        file.SetExtendedAttribute("ltfs.hash.sha512sum", new string('0', 128));
         file.SetExtendedAttribute("ltfs.hash.blake3sum", ComputeHash(data, LtfsHashAlgorithmKind.Blake3));
 
         var result = await new LtfsWriterService(device).ExtractAsync(new LtfsExtractRequest(
@@ -659,10 +875,11 @@ public sealed class LtfsWriterTests
             new LtfsWriterOptions(BlockSizeBytes: data.Length, MemoryCacheLimitBytes: LtfsWriterOptions.MinimumMemoryCacheLimitBytes)));
 
         await Assert.That(result.BytesRead).IsEqualTo(data.Length);
+        await Assert.That(result.FileResults!.Single().VerificationStatus).IsEqualTo(LtfsExtractVerificationStatus.Verified);
     }
 
     [Test]
-    public async Task Verify_uses_xxhash128_before_xxhash64_sha1_and_md5_when_stronger_hashes_missing()
+    public async Task Verify_can_limit_enabled_hashes_to_xxhash128()
     {
         var data = Encoding.ASCII.GetBytes("verify-xxhash");
         var device = new RecordingWriterDevice();
@@ -676,9 +893,237 @@ public sealed class LtfsWriterTests
 
         var result = await new LtfsWriterService(device).ExtractAsync(new LtfsExtractRequest(
             [new LtfsReadTarget(file, string.Empty, LtfsReadOperation.VerifyOnly)],
-            new LtfsWriterOptions(BlockSizeBytes: data.Length, MemoryCacheLimitBytes: LtfsWriterOptions.MinimumMemoryCacheLimitBytes)));
+            new LtfsWriterOptions(
+                BlockSizeBytes: data.Length,
+                MemoryCacheLimitBytes: LtfsWriterOptions.MinimumMemoryCacheLimitBytes,
+                Hashes: new LtfsHashOptions(Blake3: false, Sha512: false, Sha256: false, XxHash128: true, XxHash64: false, Sha1: false, Md5: false))));
 
         await Assert.That(result.BytesRead).IsEqualTo(data.Length);
+    }
+
+    [Test]
+    public async Task Write_crc32_hash_when_enabled()
+    {
+        var device = new RecordingWriterDevice { Position = new LtfsTapePosition(LtfsPartition.B, 10) };
+        var data = Encoding.ASCII.GetBytes("crc32-data");
+
+        var result = await new LtfsWriterService(device).WriteFilesAsync(new LtfsWriteRequest(
+            CreateIndex(),
+            CreateIndex().RootDirectory!,
+            [new LtfsWriteSource("crc.bin", data.Length, _ => ValueTask.FromResult<Stream>(new MemoryStream(data, writable: false)), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch)],
+            new LtfsWriterOptions(
+                BlockSizeBytes: 16,
+                ComputeHashes: true,
+                Hashes: new LtfsHashOptions(Blake3: false, Sha512: false, Sha256: false, XxHash128: false, XxHash64: false, Sha1: false, Md5: false, Crc32: true),
+                WriteDataPartitionIndexOnComplete: false,
+                RefreshIndexPartitionOnComplete: false,
+                WriteVci: false)));
+
+        var written = result.Index.RootDirectory!.Files.Single();
+        await Assert.That(written.GetExtendedAttribute("ltfs.hash.crc32sum")).IsEqualTo(ComputeHash(data, LtfsHashAlgorithmKind.Crc32));
+    }
+
+    [Test]
+    public async Task Hash_update_only_populates_enabled_hash_and_writes_checkpoint()
+    {
+        var data = Encoding.ASCII.GetBytes("hash-update");
+        var index = CreateIndex();
+        var file = new LtfsFile { Name = "existing.bin", FileUid = 2, Length = data.Length };
+        file.Extents.Add(new LtfsExtent { Partition = LtfsPartition.B, StartBlock = 10, ByteOffset = 0, ByteCount = data.Length, FileOffset = 0 });
+        index.RootDirectory!.Files.Add(file);
+        index.HighestFileUid = 2;
+        var device = new RecordingWriterDevice { DataEodBlock = 100 };
+        device.Blocks[(LtfsPartition.B, 10)] = data;
+
+        var result = await new LtfsWriterService(device).RunHashMaintenanceAsync(new LtfsHashMaintenanceRequest(
+            index,
+            [new LtfsReadTarget(file, string.Empty, LtfsReadOperation.VerifyOnly)],
+            LtfsHashMaintenanceMode.UpdateOnly,
+            new LtfsWriterOptions(
+                BlockSizeBytes: data.Length,
+                MemoryCacheLimitBytes: LtfsWriterOptions.MinimumMemoryCacheLimitBytes,
+                Hashes: new LtfsHashOptions(Blake3: false, Sha512: false, Sha256: true, XxHash128: false, XxHash64: false, Sha1: false, Md5: false, Crc32: false),
+                RefreshIndexPartitionOnComplete: false,
+                WriteVci: false)));
+
+        var updated = result.Index.RootDirectory!.Files.Single();
+        await Assert.That(updated.GetExtendedAttribute("ltfs.hash.sha256sum")).IsEqualTo(ComputeHash(data, LtfsHashAlgorithmKind.Sha256));
+        await Assert.That(result.DataPartitionIndexWritten).IsTrue();
+        await Assert.That(result.FileResults.Single().UpdateStatus).IsEqualTo(LtfsHashUpdateStatus.Updated);
+        await Assert.That(string.Join("|", device.Events)).Contains("LocateEOD:B|ReadPosition:B:100|Filemarks:B:100:1|ReadPosition:B:101|WriteBlock:B:101:");
+    }
+
+    [Test]
+    public async Task Hash_update_only_mismatch_does_not_commit_index()
+    {
+        var data = Encoding.ASCII.GetBytes("hash-mismatch");
+        var index = CreateIndex();
+        var file = new LtfsFile { Name = "existing.bin", FileUid = 2, Length = data.Length };
+        file.Extents.Add(new LtfsExtent { Partition = LtfsPartition.B, StartBlock = 10, ByteOffset = 0, ByteCount = data.Length, FileOffset = 0 });
+        file.SetExtendedAttribute("ltfs.hash.sha256sum", new string('0', 64));
+        index.RootDirectory!.Files.Add(file);
+        index.HighestFileUid = 2;
+        var device = new RecordingWriterDevice { DataEodBlock = 100 };
+        device.Blocks[(LtfsPartition.B, 10)] = data;
+
+        await Assert.That(async () => await new LtfsWriterService(device).RunHashMaintenanceAsync(new LtfsHashMaintenanceRequest(
+            index,
+            [new LtfsReadTarget(file, string.Empty, LtfsReadOperation.VerifyOnly)],
+            LtfsHashMaintenanceMode.UpdateOnly,
+            new LtfsWriterOptions(
+                BlockSizeBytes: data.Length,
+                MemoryCacheLimitBytes: LtfsWriterOptions.MinimumMemoryCacheLimitBytes,
+                Hashes: new LtfsHashOptions(Blake3: false, Sha512: false, Sha256: true, XxHash128: false, XxHash64: false, Sha1: false, Md5: false, Crc32: false),
+                RefreshIndexPartitionOnComplete: false,
+                WriteVci: false)))).ThrowsException();
+
+        await Assert.That(string.Join("|", device.Events)).DoesNotContain("ltfsindex");
+    }
+
+    [Test]
+    public async Task Hash_update_only_hashes_empty_file_without_reading_data_block()
+    {
+        var index = CreateIndex();
+        var file = new LtfsFile { Name = "empty.bin", FileUid = 2, Length = 0 };
+        index.RootDirectory!.Files.Add(file);
+        index.HighestFileUid = 2;
+        var device = new RecordingWriterDevice { DataEodBlock = 100 };
+
+        var result = await new LtfsWriterService(device).RunHashMaintenanceAsync(new LtfsHashMaintenanceRequest(
+            index,
+            [new LtfsReadTarget(file, string.Empty, LtfsReadOperation.VerifyOnly)],
+            LtfsHashMaintenanceMode.UpdateOnly,
+            new LtfsWriterOptions(
+                BlockSizeBytes: 8,
+                MemoryCacheLimitBytes: LtfsWriterOptions.MinimumMemoryCacheLimitBytes,
+                Hashes: new LtfsHashOptions(Blake3: false, Sha512: false, Sha256: false, XxHash128: false, XxHash64: false, Sha1: false, Md5: false, Crc32: true),
+                RefreshIndexPartitionOnComplete: false,
+                WriteVci: false)));
+
+        await Assert.That(result.Index.RootDirectory!.Files.Single().GetExtendedAttribute("ltfs.hash.crc32sum")).IsEqualTo(ComputeHash([], LtfsHashAlgorithmKind.Crc32));
+        await Assert.That(result.Plan.ReadCommandCount).IsEqualTo(0L);
+        await Assert.That(string.Join("|", device.Events)).DoesNotContain("ReadBlock:");
+    }
+
+    [Test]
+    public async Task Extract_rename_with_suffix_uses_available_destination()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "KokoLtfsWriterTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            var data = Encoding.ASCII.GetBytes("rename");
+            var device = new RecordingWriterDevice();
+            device.Blocks[(LtfsPartition.B, 10)] = data;
+            var file = new LtfsFile { Name = "out.bin", FileUid = 2, Length = data.Length };
+            file.Extents.Add(new LtfsExtent { Partition = LtfsPartition.B, StartBlock = 10, ByteOffset = 0, ByteCount = data.Length, FileOffset = 0 });
+            var destination = Path.Combine(temp, "out.bin");
+            await File.WriteAllTextAsync(destination, "existing");
+
+            var result = await new LtfsWriterService(device).ExtractAsync(new LtfsExtractRequest(
+                [new LtfsReadTarget(file, destination, LtfsReadOperation.ExtractOnly)],
+                new LtfsWriterOptions(BlockSizeBytes: data.Length, MemoryCacheLimitBytes: LtfsWriterOptions.MinimumMemoryCacheLimitBytes),
+                ExtractOptions: new LtfsExtractOptions(ConflictPolicy: LtfsExtractConflictPolicy.RenameWithSuffix)));
+
+            var renamed = Path.Combine(temp, "out (1).bin");
+            await Assert.That(await File.ReadAllTextAsync(destination)).IsEqualTo("existing");
+            await Assert.That(await File.ReadAllTextAsync(renamed)).IsEqualTo("rename");
+            await Assert.That(result.FileResults!.Single().DestinationPath).IsEqualTo(renamed);
+        }
+        finally
+        {
+            if (Directory.Exists(temp))
+                Directory.Delete(temp, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task Extract_skip_if_same_length_and_timestamp_does_not_read_tape()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "KokoLtfsWriterTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            var modify = DateTimeOffset.UnixEpoch.AddMinutes(5);
+            var destination = Path.Combine(temp, "same.bin");
+            await File.WriteAllTextAsync(destination, "same");
+            File.SetLastWriteTimeUtc(destination, modify.UtcDateTime);
+
+            var file = new LtfsFile
+            {
+                Name = "same.bin",
+                FileUid = 2,
+                Length = 4,
+                ModifyTime = LtfsIndex.FormatLtfsTime(modify),
+            };
+            file.Extents.Add(new LtfsExtent { Partition = LtfsPartition.B, StartBlock = 10, ByteOffset = 0, ByteCount = 4, FileOffset = 0 });
+            var device = new RecordingWriterDevice();
+
+            var result = await new LtfsWriterService(device).ExtractAsync(new LtfsExtractRequest(
+                [new LtfsReadTarget(file, destination, LtfsReadOperation.ExtractOnly)],
+                new LtfsWriterOptions(BlockSizeBytes: 4, MemoryCacheLimitBytes: LtfsWriterOptions.MinimumMemoryCacheLimitBytes),
+                ExtractOptions: new LtfsExtractOptions(ConflictPolicy: LtfsExtractConflictPolicy.SkipIfSameLengthAndTimestamp)));
+
+            await Assert.That(result.BytesRead).IsEqualTo(0L);
+            await Assert.That(result.FileResults!.Single().ExtractStatus).IsEqualTo(LtfsExtractFileStatus.Skipped);
+            await Assert.That(device.Events).DoesNotContain("Read:B:10");
+        }
+        finally
+        {
+            if (Directory.Exists(temp))
+                Directory.Delete(temp, recursive: true);
+        }
+    }
+
+    [Test]
+    public async Task Extract_symlink_skip_reports_skipped_without_reading()
+    {
+        var file = new LtfsFile { Name = "link", FileUid = 2, Length = 0, Symlink = "target.txt" };
+        var result = await new LtfsWriterService(new RecordingWriterDevice()).ExtractAsync(new LtfsExtractRequest(
+            [new LtfsReadTarget(file, "link", LtfsReadOperation.ExtractOnly)],
+            new LtfsWriterOptions(MemoryCacheLimitBytes: LtfsWriterOptions.MinimumMemoryCacheLimitBytes),
+            ExtractOptions: new LtfsExtractOptions(SymlinkPolicy: LtfsSymlinkRestorePolicy.Skip)));
+
+        await Assert.That(result.FileResults!.Single().ExtractStatus).IsEqualTo(LtfsExtractFileStatus.Skipped);
+    }
+
+    [Test]
+    public async Task Write_dedup_reuses_existing_extents_by_size_and_selected_hash()
+    {
+        var device = new RecordingWriterDevice { Position = new LtfsTapePosition(LtfsPartition.B, 10) };
+        var data = Encoding.ASCII.GetBytes("duplicate");
+        var index = CreateIndex();
+        var existing = new LtfsFile
+        {
+            Name = "existing.bin",
+            FileUid = 2,
+            Length = data.Length,
+            OpenForWrite = false,
+        };
+        existing.Extents.Add(new LtfsExtent { Partition = LtfsPartition.B, StartBlock = 42, ByteOffset = 0, ByteCount = data.Length, FileOffset = 0 });
+        existing.SetExtendedAttribute("ltfs.hash.sha1sum", ComputeHash(data, LtfsHashAlgorithmKind.Sha1));
+        existing.SetExtendedAttribute("ltfs.hash.md5sum", "legacy-md5");
+        index.RootDirectory!.Files.Add(existing);
+        index.HighestFileUid = 2;
+
+        var result = await new LtfsWriterService(device).WriteFilesAsync(new LtfsWriteRequest(
+            index,
+            index.RootDirectory!,
+            [new LtfsWriteSource("new.bin", data.Length, _ => ValueTask.FromResult<Stream>(new MemoryStream(data, writable: false)), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch)],
+            new LtfsWriterOptions(
+                BlockSizeBytes: 8,
+                WriteDataPartitionIndexOnComplete: false,
+                RefreshIndexPartitionOnComplete: false,
+                WriteVci: false,
+                Dedup: new LtfsDedupOptions(Enabled: true))));
+
+        var written = result.Index.RootDirectory!.Files.Single(x => x.Name == "new.bin");
+        await Assert.That(result.BytesWritten).IsEqualTo(0L);
+        await Assert.That(result.FilesWritten).IsEqualTo(1L);
+        await Assert.That(written.Extents.Single().StartBlock).IsEqualTo(42L);
+        await Assert.That(written.GetExtendedAttribute("ltfs.hash.sha1sum")).IsEqualTo(existing.GetExtendedAttribute("ltfs.hash.sha1sum"));
+        await Assert.That(written.GetExtendedAttribute("ltfs.hash.md5sum")).IsEqualTo("legacy-md5");
+        await Assert.That(string.Join("|", device.Events)).DoesNotContain("WriteBlock:B:10");
     }
 
     [Test]
@@ -756,12 +1201,36 @@ public sealed class LtfsWriterTests
         return stream.ToArray();
     }
 
+    private static LtfsLabel CreateLabel(Guid volumeUuid, LtfsPartition locationPartition)
+    {
+        return new LtfsLabel
+        {
+            VolumeUuid = volumeUuid,
+            LocationPartition = locationPartition,
+            IndexPartition = LtfsPartition.A,
+            DataPartition = LtfsPartition.B,
+            BlockSize = 8,
+        };
+    }
+
+    private static void SetupLegacyTwoPartition(RecordingWriterDevice device, LtfsLabel label, LtfsIndex index)
+    {
+        device.Blocks[(LtfsPartition.A, 0)] = LtfsVol1Label.Create("KOKO01");
+        device.FilemarkPayloadStarts[(LtfsPartition.A, 1)] = 2;
+        device.FilemarkPayloadStarts[(LtfsPartition.A, 3)] = 5;
+        device.IndexPayloads[(LtfsPartition.A, 2)] = LtfsLabelWriter.ToArray(label);
+        device.IndexPayloads[(LtfsPartition.A, 5)] = WriteIndex(index);
+    }
+
     private static string ComputeHash(byte[] data, LtfsHashAlgorithmKind algorithm)
     {
         using var hashSet = LtfsFileHashSet.Create(algorithm switch
         {
             LtfsHashAlgorithmKind.Blake3 => new LtfsHashOptions(Blake3: true, Sha512: false, Sha256: false, XxHash128: false, XxHash64: false, Sha1: false, Md5: false),
+            LtfsHashAlgorithmKind.Sha256 => new LtfsHashOptions(Blake3: false, Sha512: false, Sha256: true, XxHash128: false, XxHash64: false, Sha1: false, Md5: false),
             LtfsHashAlgorithmKind.XxHash128 => new LtfsHashOptions(Blake3: false, Sha512: false, Sha256: false, XxHash128: true, XxHash64: false, Sha1: false, Md5: false),
+            LtfsHashAlgorithmKind.Sha1 => new LtfsHashOptions(Blake3: false, Sha512: false, Sha256: false, XxHash128: false, XxHash64: false, Sha1: true, Md5: false),
+            LtfsHashAlgorithmKind.Crc32 => new LtfsHashOptions(Blake3: false, Sha512: false, Sha256: false, XxHash128: false, XxHash64: false, Sha1: false, Md5: false, Crc32: true),
             _ => throw new ArgumentOutOfRangeException(nameof(algorithm)),
         });
         hashSet.Append(data);
@@ -784,9 +1253,12 @@ public sealed class LtfsWriterTests
         public List<string> Events { get; } = [];
         public Dictionary<(LtfsPartition Partition, long Block), byte[]> Blocks { get; } = [];
         public Dictionary<(LtfsPartition Partition, ulong Block), byte[]> IndexPayloads { get; } = [];
+        public Dictionary<(LtfsPartition Partition, ulong Filemark), ulong> FilemarkPayloadStarts { get; } = [];
         public LtfsTapePosition Position { get; set; } = new(LtfsPartition.A, 0);
         public ulong? DataEodBlock { get; set; }
         public ulong? IndexEodBlock { get; set; }
+        public ulong? DataEodFileNumber { get; set; }
+        public ulong? IndexEodFileNumber { get; set; }
         public bool FailWrites { get; set; }
         public bool FailNextWriteAfterAdvance { get; set; }
         public int ThrowVolumeOverflowOnWriteNumber { get; set; }
@@ -838,20 +1310,25 @@ public sealed class LtfsWriterTests
 
         public ValueTask LocateEndOfDataAsync(LtfsPartition partition, CancellationToken cancellationToken = default)
         {
+            var fileNumber = partition == LtfsPartition.B ? DataEodFileNumber : IndexEodFileNumber;
             Position = new LtfsTapePosition(
                 partition,
                 partition == LtfsPartition.B && DataEodBlock is { } dataBlock
                     ? dataBlock
                     : partition == LtfsPartition.A && IndexEodBlock is { } indexBlock
                         ? indexBlock
-                        : Position.Partition == partition ? Position.Block : 10);
+                        : Position.Partition == partition ? Position.Block : 10,
+                fileNumber);
             Events.Add($"LocateEOD:{partition}");
             return ValueTask.CompletedTask;
         }
 
         public ValueTask LocateFilemarkAsync(LtfsPartition partition, ulong filemark, CancellationToken cancellationToken = default)
         {
-            Position = new LtfsTapePosition(partition, filemark);
+            var block = FilemarkPayloadStarts.TryGetValue((partition, filemark), out var payloadStart)
+                ? payloadStart - 1
+                : filemark;
+            Position = new LtfsTapePosition(partition, block, filemark);
             Events.Add($"LocateFM:{partition}:{filemark}");
             return ValueTask.CompletedTask;
         }
@@ -864,6 +1341,7 @@ public sealed class LtfsWriterTests
 
         public ValueTask<byte[]> ReadBlockAsync(long maximumBytes, CancellationToken cancellationToken = default)
         {
+            Events.Add($"ReadBlock:{Position.Partition}:{Position.Block}");
             var data = Blocks[(Position.Partition, checked((long)Position.Block))];
             Position = Position with { Block = Position.Block + 1 };
             return ValueTask.FromResult(data);
@@ -875,6 +1353,16 @@ public sealed class LtfsWriterTests
             var data = await ReadBlockAsync(buffer.Length, cancellationToken);
             data.CopyTo(buffer);
             return data.Length;
+        }
+
+        public ValueTask AdvancePastFilemarkAsync(CancellationToken cancellationToken = default)
+        {
+            if (Position.FileNumber is null)
+                throw new LtfsWriterException("Expected filemark.");
+
+            Position = Position with { Block = Position.Block + 1 };
+            Events.Add($"AdvanceFM:{Position.Partition}:{Position.Block}");
+            return ValueTask.CompletedTask;
         }
 
         public ValueTask<byte[]> ReadToFilemarkAsync(long blockSizeBytes, CancellationToken cancellationToken = default)

@@ -9,16 +9,16 @@ public sealed class LtfsScsiServiceSession : IDisposable
     {
         Drive = drive ?? throw new ArgumentNullException(nameof(drive));
         EventBus = eventBus ?? NullKokoEventBus.Instance;
-        FormatDevice = new ScsiLtfsFormatDevice(Drive);
-        WriterDevice = new ScsiLtfsWriterDevice(Drive);
+        FormatDevice = Drive;
+        WriterDevice = Drive;
         FormatService = new LtfsFormatService(FormatDevice, EventBus);
         WriterService = new LtfsWriterService(WriterDevice, EventBus);
     }
 
     public LtoTapeDrive Drive { get; }
     public IKokoEventBus EventBus { get; }
-    public ScsiLtfsFormatDevice FormatDevice { get; }
-    public ScsiLtfsWriterDevice WriterDevice { get; }
+    public ILtfsFormatDevice FormatDevice { get; }
+    public ILtfsWriterDevice WriterDevice { get; }
     public LtfsFormatService FormatService { get; }
     public LtfsWriterService WriterService { get; }
 

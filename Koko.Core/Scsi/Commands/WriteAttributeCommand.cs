@@ -1,6 +1,3 @@
-using Koko.Core.Scsi;
-using System.Linq;
-
 namespace Koko.Core.Scsi.Commands;
 
 public readonly record struct WriteAttributeCommand(

@@ -111,6 +111,11 @@ public static class LtfsIndexUpdater
 {
     public static LtfsIndex CreateDataPartitionCheckpoint(LtfsIndex source, ulong startBlock, DateTimeOffset updateTime)
     {
+        return CreateDataPartitionCheckpoint(source, LtfsPartition.B, startBlock, updateTime);
+    }
+
+    public static LtfsIndex CreateDataPartitionCheckpoint(LtfsIndex source, LtfsPartition partition, ulong startBlock, DateTimeOffset updateTime)
+    {
         ArgumentNullException.ThrowIfNull(source);
 
         var checkpoint = source.Clone();
@@ -120,7 +125,7 @@ public static class LtfsIndexUpdater
         checkpoint.UpdateTime = LtfsIndex.FormatLtfsTime(updateTime);
         checkpoint.Location = new LtfsLocation
         {
-            Partition = LtfsPartition.B,
+            Partition = partition,
             StartBlock = startBlock,
         };
         checkpoint.PreviousGenerationLocation = previousLocation;

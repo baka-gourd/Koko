@@ -2,6 +2,7 @@ using Microsoft.Win32.SafeHandles;
 
 using System.Text;
 
+using Koko.Core.Ltfs;
 using Koko.Core.Scsi.Commands;
 
 using Windows.Win32;
@@ -12,10 +13,12 @@ using Serilog;
 
 namespace Koko.Core.Scsi;
 
-public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
+public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase, ILtfsWriterDevice, ILtfsFormatDevice, ILtfsEncryptionCapableDevice, ILtfsMetadataExportDevice, ILtfsWormDetectionDevice, ILtfsModeSenseDevice
 {
     // Cannot use Lock, because inaccessible
     private readonly object _scsiGate = new();
+    private ScsiLtfsWriterDevice? writerDevice;
+    private ScsiLtfsFormatDevice? formatDevice;
 
     public string Vendor { get; private set; } = "";
     public string Product { get; private set; } = "";
@@ -35,11 +38,20 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
                 null
             );
 
-            return handle.IsInvalid ? throw new Exception("Failed to Open a LTO drive") : new LtoTapeDrive(handle);
+            if (!handle.IsInvalid)
+                return new LtoTapeDrive(handle);
+
+            var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+            throw new InvalidOperationException($"Failed to open LTO drive '{path}'. Win32 error {error}: {System.Runtime.InteropServices.Marshal.GetPInvokeErrorMessage(error)}");
         }
     }
 
     public override int BlockSizeLimit { get; set; } = 512_000;
+
+    private ScsiLtfsWriterDevice WriterDevice => writerDevice ??= new ScsiLtfsWriterDevice(this);
+
+    private ScsiLtfsFormatDevice FormatDevice => formatDevice ??= new ScsiLtfsFormatDevice(this);
+
     public override bool ScsiRead(
         ReadOnlySpan<byte> commandBlock,
         Span<byte> returnBuffer,
@@ -50,7 +62,7 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
     {
         lock (_scsiGate)
         {
-            return IOControl.IOCtlDirect(
+            var ok = IOControl.IOCtlDirect(
                 handle,
                 commandBlock,
                 returnBuffer,
@@ -58,7 +70,10 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
                 senseBuffer,
                 timeoutSeconds,
                 out scsiStatus,
-                out bytesReturned);
+                out bytesReturned,
+                out var transportError);
+            LastTransportError = transportError;
+            return ok;
         }
     }
 
@@ -71,7 +86,7 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
     {
         lock (_scsiGate)
         {
-            return IOControl.IOCtlDirect(
+            var ok = IOControl.IOCtlDirect(
                 handle,
                 commandBlock,
                 [],
@@ -79,7 +94,10 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
                 senseBuffer,
                 timeout,
                 out scsiStatus,
-                out bytesReturned);
+                out bytesReturned,
+                out var transportError);
+            LastTransportError = transportError;
+            return ok;
         }
     }
 
@@ -93,7 +111,7 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
     {
         lock (_scsiGate)
         {
-            return IOControl.IOCtlDirect(
+            var ok = IOControl.IOCtlDirect(
                 handle,
                 commandBlock,
                 dataBuffer,
@@ -101,9 +119,75 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase
                 senseBuffer,
                 timeoutSeconds,
                 out scsiStatus,
-                out bytesReturned);
+                out bytesReturned,
+                out var transportError);
+            LastTransportError = transportError;
+            return ok;
         }
     }
+
+    public ValueTask ReserveAsync(CancellationToken cancellationToken = default) => WriterDevice.ReserveAsync(cancellationToken);
+
+    public ValueTask ReleaseAsync(CancellationToken cancellationToken = default) => WriterDevice.ReleaseAsync(cancellationToken);
+
+    public ValueTask PreventRemovalAsync(bool prevent, CancellationToken cancellationToken = default) => WriterDevice.PreventRemovalAsync(prevent, cancellationToken);
+
+    public ValueTask TestUnitReadyAsync(CancellationToken cancellationToken = default) => WriterDevice.TestUnitReadyAsync(cancellationToken);
+
+    public ValueTask<long> ReadMaximumBlockSizeAsync(CancellationToken cancellationToken = default) => FormatDevice.ReadMaximumBlockSizeAsync(cancellationToken);
+
+    public ValueTask<byte> ReadMaximumExtraPartitionCountAsync(CancellationToken cancellationToken = default) => FormatDevice.ReadMaximumExtraPartitionCountAsync(cancellationToken);
+
+    public ValueTask SetCapacityAsync(ushort capacity, CancellationToken cancellationToken = default) => FormatDevice.SetCapacityAsync(capacity, cancellationToken);
+
+    public ValueTask ConfigureTwoPartitionAsync(ushort p0Size, ushort p1Size, CancellationToken cancellationToken = default) => FormatDevice.ConfigureTwoPartitionAsync(p0Size, p1Size, cancellationToken);
+
+    public ValueTask FormatMediumAsync(byte formatCode, CancellationToken cancellationToken = default) => FormatDevice.FormatMediumAsync(formatCode, cancellationToken);
+
+    public ValueTask SetBlockSizeAsync(long blockSizeBytes, CancellationToken cancellationToken = default) => WriterDevice.SetBlockSizeAsync(blockSizeBytes, cancellationToken);
+
+    public ValueTask LocateAsync(LtfsPartition partition, ulong block, CancellationToken cancellationToken = default) => WriterDevice.LocateAsync(partition, block, cancellationToken);
+
+    ValueTask ILtfsBlockReader.LocateAsync(LtfsPartition partition, long block, CancellationToken cancellationToken)
+    {
+        if (block < 0)
+            throw new ArgumentOutOfRangeException(nameof(block));
+        return LocateAsync(partition, checked((ulong)block), cancellationToken);
+    }
+
+    public ValueTask LocateEndOfDataAsync(LtfsPartition partition, CancellationToken cancellationToken = default) => WriterDevice.LocateEndOfDataAsync(partition, cancellationToken);
+
+    public ValueTask LocateFilemarkAsync(LtfsPartition partition, ulong filemark, CancellationToken cancellationToken = default) => WriterDevice.LocateFilemarkAsync(partition, filemark, cancellationToken);
+
+    public ValueTask<LtfsTapePosition> ReadPositionAsync(CancellationToken cancellationToken = default) => WriterDevice.ReadPositionAsync(cancellationToken);
+
+    public ValueTask<byte[]> ReadBlockAsync(long maximumBytes, CancellationToken cancellationToken = default) => WriterDevice.ReadBlockAsync(maximumBytes, cancellationToken);
+
+    public ValueTask AdvancePastFilemarkAsync(CancellationToken cancellationToken = default) => WriterDevice.AdvancePastFilemarkAsync(cancellationToken);
+
+    public ValueTask<int> ReadBlockAsync(LtfsPartition partition, long block, Memory<byte> buffer, CancellationToken cancellationToken = default) => WriterDevice.ReadBlockAsync(partition, block, buffer, cancellationToken);
+
+    public ValueTask<byte[]> ReadToFilemarkAsync(long blockSizeBytes, CancellationToken cancellationToken = default) => WriterDevice.ReadToFilemarkAsync(blockSizeBytes, cancellationToken);
+
+    public ValueTask WriteBlockAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) => WriterDevice.WriteBlockAsync(data, cancellationToken);
+
+    public ValueTask WriteFilemarksAsync(uint count, CancellationToken cancellationToken = default) => WriterDevice.WriteFilemarksAsync(count, cancellationToken);
+
+    public ValueTask WriteMamAttributesAsync(LtfsPartition partition, IReadOnlyList<MamAttribute> attributes, CancellationToken cancellationToken = default) => FormatDevice.WriteMamAttributesAsync(partition, attributes, cancellationToken);
+
+    public ValueTask WriteVciAsync(ulong generation, ulong? indexPartitionBlock, ulong dataPartitionBlock, Guid volumeUuid, CancellationToken cancellationToken = default) => WriterDevice.WriteVciAsync(generation, indexPartitionBlock, dataPartitionBlock, volumeUuid, cancellationToken);
+
+    public ValueTask FlushAsync(CancellationToken cancellationToken = default) => WriterDevice.FlushAsync(cancellationToken);
+
+    public ValueTask LoadUnloadAsync(bool load, CancellationToken cancellationToken = default) => WriterDevice.LoadUnloadAsync(load, cancellationToken);
+
+    public ValueTask<LogSenseResponse> ReadLogSenseAsync(LogPageCode pageCode, CancellationToken cancellationToken = default) => WriterDevice.ReadLogSenseAsync(pageCode, cancellationToken);
+
+    public ValueTask SetEncryptionAsync(ReadOnlyMemory<byte>? key, CancellationToken cancellationToken = default) => WriterDevice.SetEncryptionAsync(key, cancellationToken);
+
+    public ValueTask<IReadOnlyList<MamAttribute>> ReadMamAttributesAsync(CancellationToken cancellationToken = default) => WriterDevice.ReadMamAttributesAsync(cancellationToken);
+
+    public ValueTask<LtfsPartitionModeSense> ReadPartitionModeSenseAsync(CancellationToken cancellationToken = default) => FormatDevice.ReadPartitionModeSenseAsync(cancellationToken);
 
     public bool GetInquiry(uint timeoutSeconds = 10)
     {

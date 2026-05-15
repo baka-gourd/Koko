@@ -1,7 +1,5 @@
 using System.Runtime.CompilerServices;
 
-using Windows.Win32;
-
 using Serilog;
 using Serilog.Context;
 

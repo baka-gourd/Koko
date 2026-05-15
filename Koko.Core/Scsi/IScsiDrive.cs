@@ -4,6 +4,8 @@ public interface IScsiDrive
 {
     public int BlockSizeLimit { get; set; }
 
+    public ScsiTransportError? LastTransportError { get; }
+
     public bool ScsiRead(
         ReadOnlySpan<byte> commandBlock,
         Span<byte> returnBuffer,

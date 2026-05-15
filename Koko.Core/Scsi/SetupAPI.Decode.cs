@@ -1,7 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
 
-using Windows.Win32;
 using Windows.Win32.Devices.Properties;
 using Windows.Win32.System.Registry;
 
