@@ -7,6 +7,10 @@ public readonly record struct PersistentReserveOutCommand(
     ReadOnlyMemory<byte> ParameterData,
     uint TimeoutSeconds = 10)
 {
+    public PersistentReserveOutCommand() : this(0, 0, 0, default, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         PersistentReserveOutCommand request,

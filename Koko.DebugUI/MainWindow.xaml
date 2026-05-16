@@ -31,8 +31,8 @@
                 <Separator Margin="0,4,0,12" />
                 <TextBlock Text="Real SCSI Tape" FontWeight="SemiBold" Margin="0,0,0,8" />
                 <Button Content="Refresh SCSI Tape Drives" Click="RefreshDrives_Click" Height="32" />
-                <ComboBox x:Name="DriveComboBox" DisplayMemberPath="DisplayName" Margin="0,8,0,8" Height="28" />
                 <Button Content="Show TUR Packet HexDump" Click="ShowTurPacketHexDump_Click" Height="32" Margin="0,0,0,8" />
+                <TextBox x:Name="Manual" Margin="0,0,0,8" Height="28" />
                 <Button Content="Read Index Partition Schema" Click="ReadIndexPartitionSchema_Click" Height="32" />
                 <TextBlock Margin="0,8,0,0" TextWrapping="Wrap" Foreground="DimGray" Text="Reads from the selected real LTO drive using Core LTFS device interfaces. This is non-destructive." />
 

@@ -5,6 +5,10 @@ public readonly record struct ReadCdRom6Command(
     byte TransferLength,
     uint TimeoutSeconds = 10)
 {
+    public ReadCdRom6Command() : this(0, 0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReadCdRom6Command request,

@@ -6,6 +6,10 @@ public readonly record struct StartStopUnitCommand(
     bool Immediate = false,
     uint TimeoutSeconds = 10)
 {
+    public StartStopUnitCommand() : this(false, false, false, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         StartStopUnitCommand request,

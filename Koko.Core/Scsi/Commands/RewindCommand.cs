@@ -4,6 +4,10 @@ public readonly record struct RewindCommand(
     bool Immediate,
     uint TimeoutSeconds = 60)
 {
+    public RewindCommand() : this(false, 60)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         RewindCommand request,

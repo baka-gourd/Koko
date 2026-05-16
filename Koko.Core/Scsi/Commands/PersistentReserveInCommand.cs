@@ -5,6 +5,10 @@ public readonly record struct PersistentReserveInCommand(
     ushort AllocationLength,
     uint TimeoutSeconds = 10)
 {
+    public PersistentReserveInCommand() : this(0, 0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         PersistentReserveInCommand request,

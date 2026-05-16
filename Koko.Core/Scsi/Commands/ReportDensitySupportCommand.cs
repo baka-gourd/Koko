@@ -6,6 +6,10 @@ public readonly record struct ReportDensitySupportCommand(
     ushort AllocationLength,
     uint TimeoutSeconds = 10)
 {
+    public ReportDensitySupportCommand() : this(false, false, 0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReportDensitySupportCommand request,

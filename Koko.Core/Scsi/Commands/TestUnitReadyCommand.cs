@@ -3,6 +3,10 @@ namespace Koko.Core.Scsi.Commands;
 public readonly record struct TestUnitReadyCommand(
     uint TimeoutSeconds = 10)
 {
+    public TestUnitReadyCommand() : this(10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         TestUnitReadyCommand request,

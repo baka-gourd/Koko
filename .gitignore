@@ -362,5 +362,9 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 
+# More migration
+Docs/
 LTFSCopyGUI/
+LtfsCapybara/
 .opencode/
+AGENTS.md

@@ -7,6 +7,10 @@ public readonly record struct LogSelectCommand(
     bool SaveParameters = false,
     uint TimeoutSeconds = 10)
 {
+    public LogSelectCommand() : this(default, false, default, false, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         LogSelectCommand request,

@@ -4,6 +4,10 @@ public readonly record struct ReportSupportedTaskManagementFunctionsCommand(
     uint AllocationLength,
     uint TimeoutSeconds = 10)
 {
+    public ReportSupportedTaskManagementFunctionsCommand() : this(0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReportSupportedTaskManagementFunctionsCommand request,

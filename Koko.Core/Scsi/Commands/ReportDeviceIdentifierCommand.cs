@@ -4,6 +4,10 @@ public readonly record struct ReportDeviceIdentifierCommand(
     uint AllocationLength,
     uint TimeoutSeconds = 10)
 {
+    public ReportDeviceIdentifierCommand() : this(0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReportDeviceIdentifierCommand request,

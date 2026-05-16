@@ -3,7 +3,7 @@
 using namespace System;
 using namespace System::Runtime::InteropServices;
 
-namespace Koko::Native::Scsi
+namespace Koko::Native
 {
     public ref class ScsiIoControl abstract sealed
     {

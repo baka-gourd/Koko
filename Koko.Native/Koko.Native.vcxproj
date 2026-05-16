@@ -15,7 +15,7 @@
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>ManagedCProj</Keyword>
     <ProjectGuid>{79BB22EB-D960-4955-B080-66C7F3D0D5D8}</ProjectGuid>
-    <RootNamespace>KokoNativeScsi</RootNamespace>
+    <RootNamespace>KokoNative</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
     <TargetFramework>net11.0-windows10.0.19041.0</TargetFramework>
   </PropertyGroup>
@@ -24,7 +24,7 @@
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
-    <UseDebugLibraries>true</UseDebugLibraries>
+    <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
     <CLRSupport>NetCore</CLRSupport>
     <CharacterSet>Unicode</CharacterSet>
@@ -68,7 +68,7 @@
       <DisableSpecificWarnings>4679;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>kernel32.lib;setupapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -80,15 +80,20 @@
       <DisableSpecificWarnings>4679;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>kernel32.lib;setupapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
   <ItemGroup>
+    <ClInclude Include="NativeDevice.h" />
+    <ClInclude Include="NativeFile.h" />
     <ClInclude Include="ScsiIoControl.h" />
+    <ClInclude Include="SetupApi.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="NativeFile.cpp" />
     <ClCompile Include="ScsiIoControl.cpp" />
+    <ClCompile Include="SetupApi.cpp" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

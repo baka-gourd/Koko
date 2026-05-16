@@ -4,6 +4,10 @@ public readonly record struct ReportTargetPortGroupsCommand(
     uint AllocationLength,
     uint TimeoutSeconds = 10)
 {
+    public ReportTargetPortGroupsCommand() : this(0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReportTargetPortGroupsCommand request,

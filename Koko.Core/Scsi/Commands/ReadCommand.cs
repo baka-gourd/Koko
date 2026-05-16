@@ -7,6 +7,10 @@ public readonly record struct ReadCommand(
     int? BlockSizeBytes = null,
     uint TimeoutSeconds = 60)
 {
+    public ReadCommand() : this(false, false, 0, null, 60)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReadCommand request,

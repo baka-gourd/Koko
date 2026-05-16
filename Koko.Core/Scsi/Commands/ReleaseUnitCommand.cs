@@ -6,6 +6,10 @@ public readonly record struct ReleaseUnitCommand(
     byte ThirdPartyDeviceId = 0,
     uint TimeoutSeconds = 10)
 {
+    public ReleaseUnitCommand() : this(false, false, 0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReleaseUnitCommand request,

@@ -4,6 +4,10 @@ public readonly record struct PreventAllowMediumRemovalCommand(
     bool Prevent,
     uint TimeoutSeconds = 10)
 {
+    public PreventAllowMediumRemovalCommand() : this(false, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         PreventAllowMediumRemovalCommand request,

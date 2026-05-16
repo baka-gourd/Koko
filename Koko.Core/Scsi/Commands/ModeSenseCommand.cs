@@ -17,6 +17,10 @@ public readonly record struct ModeSenseCommand(
     ushort AllocationLength,
     uint TimeoutSeconds = 10)
 {
+    public ModeSenseCommand() : this(false, false, default, 0, 0, 0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ModeSenseCommand request,

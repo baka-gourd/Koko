@@ -5,6 +5,10 @@ public readonly record struct ReadCapacityCommand(
     bool PartialMediumIndicator = false,
     uint TimeoutSeconds = 10)
 {
+    public ReadCapacityCommand() : this(0, false, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReadCapacityCommand request,

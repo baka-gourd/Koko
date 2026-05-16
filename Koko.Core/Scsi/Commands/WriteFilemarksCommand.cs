@@ -6,6 +6,10 @@ public readonly record struct WriteFilemarksCommand(
     bool WriteSetMarks = false,
     uint TimeoutSeconds = 60)
 {
+    public WriteFilemarksCommand() : this(false, 0, false, 60)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         WriteFilemarksCommand request,

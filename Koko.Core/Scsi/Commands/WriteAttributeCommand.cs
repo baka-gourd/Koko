@@ -6,6 +6,10 @@ public readonly record struct WriteAttributeCommand(
     ReadOnlyMemory<byte> ParameterList,
     uint TimeoutSeconds = 30)
 {
+    public WriteAttributeCommand() : this(0, 0, default, 30)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         WriteAttributeCommand request,

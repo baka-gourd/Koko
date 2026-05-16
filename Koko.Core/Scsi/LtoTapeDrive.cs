@@ -1,15 +1,12 @@
-using Microsoft.Win32.SafeHandles;
-
-using System.Text;
-
+using System.Runtime.InteropServices;
 using Koko.Core.Ltfs;
 using Koko.Core.Scsi.Commands;
 
-using Windows.Win32;
-using Windows.Win32.Foundation;
-using Windows.Win32.Storage.FileSystem;
+using Microsoft.Win32.SafeHandles;
 
 using Serilog;
+
+using System.Text;
 
 namespace Koko.Core.Scsi;
 
@@ -29,20 +26,12 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase, ILtfsWriter
         using (Log.PushMethod())
         {
             Log.Debug("Path={Path}", path);
-            var handle = PInvoke.CreateFile(path,
-                (uint)(GENERIC_ACCESS_RIGHTS.GENERIC_READ | GENERIC_ACCESS_RIGHTS.GENERIC_WRITE),
-                FILE_SHARE_MODE.FILE_SHARE_READ | FILE_SHARE_MODE.FILE_SHARE_WRITE,
-                null,
-                FILE_CREATION_DISPOSITION.OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES.SECURITY_ANONYMOUS,
-                null
-            );
+            var handle = Koko.Native.NativeFile.OpenExistingReadWrite(path, out var error);
 
             if (!handle.IsInvalid)
                 return new LtoTapeDrive(handle);
 
-            var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
-            throw new InvalidOperationException($"Failed to open LTO drive '{path}'. Win32 error {error}: {System.Runtime.InteropServices.Marshal.GetPInvokeErrorMessage(error)}");
+            throw new InvalidOperationException($"Failed to open LTO drive '{path}'. Win32 error {error}: {Marshal.GetPInvokeErrorMessage(error)}");
         }
     }
 

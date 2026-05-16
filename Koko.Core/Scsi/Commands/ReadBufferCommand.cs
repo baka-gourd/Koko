@@ -7,6 +7,10 @@ public readonly record struct ReadBufferCommand(
     uint AllocationLength = 0,
     uint TimeoutSeconds = 10)
 {
+    public ReadBufferCommand() : this(0, 0, 0, 0, 10)
+    {
+    }
+
     private const byte DescriptorMode = 0x03;
 
     public static bool TryExecute(

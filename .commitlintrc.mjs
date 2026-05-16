@@ -82,7 +82,7 @@ export default {
         useAI: false,
         aiNumber: 1,
         themeColorCode: "",
-        scopes: ["WinUI", "Core", "Demo", "All"],
+        scopes: ["WinUI", "Core", "Demo", "Web", "All"],
         allowCustomScopes: true,
         allowEmptyScopes: true,
         customScopesAlign: "bottom",

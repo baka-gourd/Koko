@@ -4,22 +4,22 @@
     <TargetFramework>net11.0-windows10.0.19041.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <CsWin32UseSafeHandles>true</CsWin32UseSafeHandles>
     <PlatformTarget>x64</PlatformTarget>
     <Platforms>x64</Platforms>
     <LangVersion>14</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Blake3" Version="2.2.1" />
     <PackageReference Include="Humanizer.Core" Version="3.0.10" />
     <PackageReference Include="Microsoft.Extensions.FileSystemGlobbing" Version="10.0.8" />
-    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.275">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
     <PackageReference Include="Serilog.Extensions.Logging" Version="10.0.0" />
     <PackageReference Include="System.IO.Hashing" Version="10.0.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Koko.Native\Koko.Native.vcxproj" />
   </ItemGroup>
 
   <ItemGroup>

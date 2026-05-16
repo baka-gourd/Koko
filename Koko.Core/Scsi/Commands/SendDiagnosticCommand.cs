@@ -6,6 +6,10 @@ public readonly record struct SendDiagnosticCommand(
     ReadOnlyMemory<byte> ParameterData,
     uint TimeoutSeconds = 60)
 {
+    public SendDiagnosticCommand() : this(false, false, default, 60)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         SendDiagnosticCommand request,

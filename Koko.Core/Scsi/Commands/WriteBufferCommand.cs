@@ -7,6 +7,10 @@ public readonly record struct WriteBufferCommand(
     ReadOnlyMemory<byte> Data = default,
     uint TimeoutSeconds = 10)
 {
+    public WriteBufferCommand() : this(0, 0, 0, default, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         WriteBufferCommand request,

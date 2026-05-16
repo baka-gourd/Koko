@@ -14,5 +14,8 @@
   <Project Path="Koko.Demo/Koko.Demo.csproj" Id="a58b8a89-cecc-4da9-8666-3eb665bd1ab4">
     <Platform Project="x64" />
   </Project>
+  <Project Path="Koko.Native/Koko.Native.vcxproj" Id="79bb22eb-d960-4955-b080-66c7f3d0d5d8">
+    <Platform Project="x64" />
+  </Project>
   <Project Path="Koko.Web/Koko.Web.csproj" Id="fa565e66-216c-47b6-8838-967fc1f58dab" />
 </Solution>

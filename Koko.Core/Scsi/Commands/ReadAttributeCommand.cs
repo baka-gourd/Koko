@@ -9,6 +9,10 @@ public readonly record struct ReadAttributeCommand(
     bool Cache = false,
     uint TimeoutSeconds = 10)
 {
+    public ReadAttributeCommand() : this(0, 0, 0, 0, 0, false, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReadAttributeCommand request,

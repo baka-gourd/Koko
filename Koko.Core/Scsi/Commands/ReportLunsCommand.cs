@@ -5,6 +5,10 @@ public readonly record struct ReportLunsCommand(
     uint AllocationLength = 0,
     uint TimeoutSeconds = 10)
 {
+    public ReportLunsCommand() : this(0, 0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReportLunsCommand request,

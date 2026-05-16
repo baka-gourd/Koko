@@ -8,6 +8,10 @@ public readonly record struct ModeSelectCommand(
     ushort ParameterListLength = 0,
     uint TimeoutSeconds = 10)
 {
+    public ModeSelectCommand() : this(false, false, false, default, 0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ModeSelectCommand request,

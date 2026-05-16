@@ -6,6 +6,10 @@ public readonly record struct ReserveUnitCommand(
     byte ThirdPartyDeviceId = 0,
     uint TimeoutSeconds = 10)
 {
+    public ReserveUnitCommand() : this(false, false, 0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReserveUnitCommand request,

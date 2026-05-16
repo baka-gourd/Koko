@@ -4,6 +4,10 @@ public readonly record struct ReadMediaSerialNumberCommand(
     ushort AllocationLength,
     uint TimeoutSeconds = 10)
 {
+    public ReadMediaSerialNumberCommand() : this(0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReadMediaSerialNumberCommand request,

@@ -13,6 +13,10 @@ public readonly record struct SpaceCommand(
     long Count,
     uint TimeoutSeconds = 60)
 {
+    public SpaceCommand() : this(false, default, 0, 60)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         SpaceCommand request,

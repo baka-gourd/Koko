@@ -6,6 +6,10 @@ public readonly record struct ReceiveDiagnosticResultsCommand(
     ushort AllocationLength,
     uint TimeoutSeconds = 10)
 {
+    public ReceiveDiagnosticResultsCommand() : this(0, false, 0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReceiveDiagnosticResultsCommand request,

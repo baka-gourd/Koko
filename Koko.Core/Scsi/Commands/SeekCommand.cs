@@ -4,6 +4,10 @@ public readonly record struct SeekCommand(
     uint LogicalBlockAddress,
     uint TimeoutSeconds = 10)
 {
+    public SeekCommand() : this(0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         SeekCommand request,

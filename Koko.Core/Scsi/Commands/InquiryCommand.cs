@@ -6,6 +6,10 @@ public readonly record struct InquiryCommand(
     ushort AllocationLength = 0,
     uint TimeoutSeconds = 10)
 {
+    public InquiryCommand() : this(false, 0, 0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         InquiryCommand request,

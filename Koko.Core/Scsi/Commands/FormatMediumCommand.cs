@@ -6,6 +6,10 @@ public readonly record struct FormatMediumCommand(
     ushort TransferLength = 0,
     uint TimeoutSeconds = 60)
 {
+    public FormatMediumCommand() : this(false, 0, 0, 60)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         FormatMediumCommand request,

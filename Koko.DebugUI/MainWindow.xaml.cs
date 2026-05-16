@@ -59,19 +59,20 @@ public partial class MainWindow : Window
         try
         {
             SetBusy("Refreshing SCSI tape drives");
-            DriveComboBox.Items.Clear();
 
             var drives = SetupAPI.ListDevices("SCSI").Where(x =>
                 x.ClassName is not null && x.ClassName.Equals("TapeDrive", StringComparison.InvariantCultureIgnoreCase));
 
-            foreach (var drive in drives)
-                DriveComboBox.Items.Add(new DebugDriveItem($"\\\\.\\globalroot{drive.PhysicalDeviceObjectName}",
-                    $"\\\\.\\globalroot{drive.PhysicalDeviceObjectName}"));
+            var firstDrive = drives.FirstOrDefault();
+            if (firstDrive?.PhysicalDeviceObjectName is null)
+            {
+                Manual.Clear();
+                AppendLog("No SCSI tape drive found.");
+                return;
+            }
 
-            if (DriveComboBox.Items.Count > 0)
-                DriveComboBox.SelectedIndex = 0;
-
-            AppendLog($"Found SCSI tape drive(s).");
+            Manual.Text = ToGlobalRootPath(firstDrive.PhysicalDeviceObjectName);
+            AppendLog($"Found SCSI tape drive: {Manual.Text}");
         }
         catch (Exception ex)
         {
@@ -85,20 +86,23 @@ public partial class MainWindow : Window
 
     private async void ReadIndexPartitionSchema_Click(object sender, RoutedEventArgs e)
     {
-        if (DriveComboBox.SelectedItem is not DebugDriveItem selected)
+        var devicePath = Manual.Text?.Trim();
+        if (string.IsNullOrWhiteSpace(devicePath))
         {
-            MessageBox.Show(this, "Select a SCSI tape drive first.", "Koko Debug UI", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(this, "Enter a SCSI tape drive path first.", "Koko Debug UI", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
+        MessageBox.Show(this, devicePath, "Opening SCSI Path", MessageBoxButton.OK, MessageBoxImage.Information);
+
         try
         {
-            SetBusy($"Discovering LTFS schema from {selected.DisplayName}");
+            SetBusy($"Discovering LTFS schema from {devicePath}");
             CommandDetailsGrid.ItemsSource = null;
-            var result = await Task.Run(() => ReadIndexPartitionSchema(selected.DevicePath));
+            var result = await Task.Run(() => ReadIndexPartitionSchema(devicePath));
             CommandDetailsGrid.ItemsSource = result.CommandTraces;
-            DisplayIndex(result.Index, $"{selected.DisplayName} ({result.Source})");
-            AppendLog($"Discovered LTFS schema from {selected.DevicePath}. Source={result.Source}, append={result.AppendPoint.Partition}{result.AppendPoint.Block}, dirty={result.DirtyAppendDetected}, blocksize={result.Label?.BlockSize ?? 0}.");
+            DisplayIndex(result.Index, $"{devicePath} ({result.Source})");
+            AppendLog($"Discovered LTFS schema from {devicePath}. Source={result.Source}, append={result.AppendPoint.Partition}{result.AppendPoint.Block}, dirty={result.DirtyAppendDetected}, blocksize={result.Label?.BlockSize ?? 0}.");
             foreach (var warning in result.Warnings)
                 AppendLog($"WARN: {warning}");
         }
@@ -127,12 +131,13 @@ public partial class MainWindow : Window
 
     private static async Task<DebugReadResult> ReadIndexPartitionSchema(string devicePath)
     {
-        var manager = DriveSessionManager.Instance.Value;
-        using var lease = manager.Lease(devicePath, id => LtoTapeDrive.OpenDriveByPath(id));
-        if (lease.Drive is not LtoTapeDrive lto)
-            throw new InvalidOperationException("Device is not an LTO tape drive.");
+        //var manager = DriveSessionManager.Instance.Value;
+        //using var lease = manager.Lease(devicePath, LtoTapeDrive.OpenDriveByPath);
+        //if (lease.Drive is not LtoTapeDrive lto)
+        //    throw new InvalidOperationException("Device is not an LTO tape drive.");
+        var dev = LtoTapeDrive.OpenDriveByPath(devicePath);
 
-        var traceDrive = new TraceScsiDrive(lto);
+        var traceDrive = new TraceScsiDrive(dev);
         var device = new ScsiLtfsWriterDevice(traceDrive);
 
         try
@@ -276,7 +281,16 @@ public partial class MainWindow : Window
         MessageBox.Show(this, $"{message}{Environment.NewLine}{exception.Message}", "Koko Debug UI", MessageBoxButton.OK, MessageBoxImage.Error);
     }
 
-    private sealed record DebugDriveItem(string DisplayName, string DevicePath);
+    private static string ToGlobalRootPath(string physicalDeviceObjectName)
+    {
+        if (physicalDeviceObjectName.StartsWith(@"\\.\", StringComparison.OrdinalIgnoreCase))
+            return physicalDeviceObjectName;
+
+        if (physicalDeviceObjectName.StartsWith(@"\Device\", StringComparison.OrdinalIgnoreCase))
+            return $@"\\.\globalroot{physicalDeviceObjectName}";
+
+        return physicalDeviceObjectName;
+    }
 
     private sealed record DebugReadResult(
         LtfsVolumeDiscoveryResult IndexResult,

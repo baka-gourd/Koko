@@ -5,6 +5,10 @@ public readonly record struct EraseCommand(
     bool LongErase,
     uint TimeoutSeconds = 60)
 {
+    public EraseCommand() : this(false, false, 60)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         EraseCommand request,

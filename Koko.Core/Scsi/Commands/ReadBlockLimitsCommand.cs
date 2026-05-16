@@ -3,6 +3,10 @@ namespace Koko.Core.Scsi.Commands;
 public readonly record struct ReadBlockLimitsCommand(
     uint TimeoutSeconds = 10)
 {
+    public ReadBlockLimitsCommand() : this(10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReadBlockLimitsCommand request,

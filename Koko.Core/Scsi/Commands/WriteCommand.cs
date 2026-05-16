@@ -6,6 +6,10 @@ public readonly record struct WriteCommand(
     int? BlockSizeBytes = null,
     uint TimeoutSeconds = 60)
 {
+    public WriteCommand() : this(false, 0, null, 60)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         WriteCommand request,

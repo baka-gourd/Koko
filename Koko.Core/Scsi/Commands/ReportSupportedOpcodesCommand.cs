@@ -8,6 +8,10 @@ public readonly record struct ReportSupportedOpcodesCommand(
     uint AllocationLength = 0,
     uint TimeoutSeconds = 10)
 {
+    public ReportSupportedOpcodesCommand() : this(0, false, 0, 0, 0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReportSupportedOpcodesCommand request,

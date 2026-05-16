@@ -5,6 +5,10 @@ public readonly record struct RequestSenseCommand(
     byte AllocationLength = 0x12,
     uint TimeoutSeconds = 10)
 {
+    public RequestSenseCommand() : this(false, 0x12, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         RequestSenseCommand request,

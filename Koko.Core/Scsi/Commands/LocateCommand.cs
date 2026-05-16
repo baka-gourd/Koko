@@ -17,6 +17,10 @@ public readonly record struct LocateCommand(
     ulong LogicalIdentifier,
     uint TimeoutSeconds = 60)
 {
+    public LocateCommand() : this(false, false, false, 0, 0, 0, 0, 60)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         LocateCommand request,

@@ -7,6 +7,10 @@ public readonly record struct LoadUnloadCommand(
     bool Load,
     uint TimeoutSeconds = 60)
 {
+    public LoadUnloadCommand() : this(false, false, false, false, 60)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         LoadUnloadCommand request,

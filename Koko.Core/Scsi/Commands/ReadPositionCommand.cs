@@ -12,6 +12,10 @@ public readonly record struct ReadPositionCommand(
     ushort AllocationLength = 0,
     uint TimeoutSeconds = 10)
 {
+    public ReadPositionCommand() : this(default, 0, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         ReadPositionCommand request,

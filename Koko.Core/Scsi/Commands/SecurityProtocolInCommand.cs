@@ -7,6 +7,10 @@ public readonly record struct SecurityProtocolInCommand(
     bool IncrementBy512 = false,
     uint TimeoutSeconds = 10)
 {
+    public SecurityProtocolInCommand() : this(0, 0, 0, false, 10)
+    {
+    }
+
     public static bool TryExecute(
         IScsiDrive drive,
         SecurityProtocolInCommand request,
