@@ -13,7 +13,7 @@ using Serilog;
 
 namespace Koko.Core.Scsi;
 
-public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase, ILtfsWriterDevice, ILtfsFormatDevice, ILtfsEncryptionCapableDevice, ILtfsMetadataExportDevice, ILtfsWormDetectionDevice, ILtfsModeSenseDevice
+public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase, ILtfsWriterDevice, ILtfsFormatDevice, ILtfsEncryptionCapableDevice, ILtfsMetadataExportDevice, ILtfsPartitionMamDevice, ILtfsWormDetectionDevice, ILtfsModeSenseDevice
 {
     // Cannot use Lock, because inaccessible
     private readonly object _scsiGate = new();
@@ -186,6 +186,8 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase, ILtfsWriter
     public ValueTask SetEncryptionAsync(ReadOnlyMemory<byte>? key, CancellationToken cancellationToken = default) => WriterDevice.SetEncryptionAsync(key, cancellationToken);
 
     public ValueTask<IReadOnlyList<MamAttribute>> ReadMamAttributesAsync(CancellationToken cancellationToken = default) => WriterDevice.ReadMamAttributesAsync(cancellationToken);
+
+    public ValueTask<IReadOnlyList<MamAttribute>> ReadMamAttributesAsync(LtfsPartition partition, CancellationToken cancellationToken = default) => WriterDevice.ReadMamAttributesAsync(partition, cancellationToken);
 
     public ValueTask<LtfsPartitionModeSense> ReadPartitionModeSenseAsync(CancellationToken cancellationToken = default) => FormatDevice.ReadPartitionModeSenseAsync(cancellationToken);
 

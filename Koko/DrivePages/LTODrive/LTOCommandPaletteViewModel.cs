@@ -15,6 +15,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Koko.Core.Helpers;
+using Koko.Core.Scsi.Commands;
 using Koko.Helpers;
 using Koko.Core.Scsi.Parsers;
 
@@ -150,7 +151,7 @@ public sealed partial class LTOCommandPaletteViewModel : ObservableObject
             }
 
             var manager = DriveSessionManager.Instance.Value;
-            using var lease = manager.Lease(DevicePath, id => LtoTapeDrive.OpenDriveByPath($@"\\.\globalroot{id}"));
+            using var lease = manager.Lease(DevicePath, id => LtoTapeDrive.OpenDriveByPath(id));
             if (lease.Drive is not LtoTapeDrive lto)
             {
                 await MessageBox.ShowAsync("Device Error", "Device is not a LTO Drive");
@@ -186,8 +187,8 @@ public sealed partial class LTOCommandPaletteViewModel : ObservableObject
 
             if (!ok)
             {
-                var err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-                Log.Error(new Win32Exception(err), "LTO Error");
+                if (lto.LastTransportError is { } error)
+                    Log.Error(new Win32Exception(error.ErrorCode), "LTO Error: {Message}", error.Message);
                 InfoText = FormatToText(_scsiCommand, data, sense);
                 return;
             }
@@ -199,6 +200,59 @@ public sealed partial class LTOCommandPaletteViewModel : ObservableObject
 
             InfoText = FormatToText(_scsiCommand, data, sense);
             CanSend = true;
+        }
+    }
+
+    private async Task ReadCM()
+    {
+        using (Log.PushMethod())
+        {
+            CanSend = false;
+            try
+            {
+                if (DevicePath is null)
+                {
+                    await MessageBox.ShowAsync("Device Error", "Device path is null");
+                    return;
+                }
+
+                var manager = DriveSessionManager.Instance.Value;
+                using var lease = manager.Lease(DevicePath, id => LtoTapeDrive.OpenDriveByPath(id));
+                if (lease.Drive is not LtoTapeDrive lto)
+                {
+                    await MessageBox.ShowAsync("Device Error", "Device is not a LTO Drive");
+                    return;
+                }
+
+                var request = new ReadBufferCommand(Mode: 2, BufferId: 0x10, TimeoutSeconds: 60);
+                var ok = ReadBufferCommand.TryExecuteWithLengthProbe(lto, request, out var result, out var data);
+                if (!ok)
+                {
+                    if (lto.LastTransportError is { } error)
+                        Log.Error(new Win32Exception(error.ErrorCode), "Failed to read CM: {Message}", error.Message);
+                    InfoText = "Failed to read CM";
+                    return;
+                }
+
+                if (!result.IsGood)
+                {
+                    InfoText = $"SENSE\n{SenseParser.ParseSense(result.SenseData)}";
+                    return;
+                }
+
+                if (data.Length == 0)
+                {
+                    InfoText = "Empty CM buffer.";
+                    return;
+                }
+
+                var parser = CMParser.CreateFromSpan(data);
+                InfoText = parser.GetModernReport();
+            }
+            finally
+            {
+                CanSend = true;
+            }
         }
     }
 

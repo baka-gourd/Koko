@@ -18,7 +18,7 @@ public readonly record struct SeekCommand(
         return ScsiCommandExecutor.TryExecuteNoData(
             drive,
             cdb,
-            DataDirection.Unspecified,
+            DataDirection.In,
             request.TimeoutSeconds,
             out result);
     }

@@ -28,7 +28,7 @@ public readonly record struct WriteFilemarksCommand(
         return ScsiCommandExecutor.TryExecuteNoData(
             drive,
             cdb,
-            DataDirection.Unspecified,
+            DataDirection.In,
             request.TimeoutSeconds,
             out result);
     }

@@ -40,7 +40,25 @@ public class IOControl
     private unsafe struct SptdWithSense64
     {
         public SCSI_PASS_THROUGH_DIRECT Sptd;
+        public uint Filler;
         public fixed byte Sense[DefaultSenseLength];
+    }
+
+    public static unsafe byte[] CreateNoDataPacketBytesForDebug(
+        ReadOnlySpan<byte> commandBlock,
+        DataDirection dataDirection,
+        uint timeoutSeconds)
+    {
+        if (commandBlock.IsEmpty)
+            throw new ArgumentException("CDB cannot be empty.", nameof(commandBlock));
+
+        if (commandBlock.Length > DefaultCommandBlockLength)
+            throw new ArgumentOutOfRangeException(nameof(commandBlock), "CDB length must be <= 16.");
+
+        var packet = CreatePacket(commandBlock, 0, dataDirection, timeoutSeconds);
+        var bytes = new byte[sizeof(SptdWithSense64)];
+        MemoryMarshal.Write(bytes, in packet);
+        return bytes;
     }
 
     internal static unsafe ScsiPassThroughPacketSnapshot CreatePacketSnapshot(

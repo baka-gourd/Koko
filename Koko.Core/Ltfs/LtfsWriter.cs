@@ -497,6 +497,13 @@ public interface ILtfsWriterDevice : ILtfsBlockReader
     }
 }
 
+public interface ILtfsPartitionMamDevice
+{
+    ValueTask<IReadOnlyList<MamAttribute>> ReadMamAttributesAsync(
+        LtfsPartition partition,
+        CancellationToken cancellationToken = default);
+}
+
 public sealed class LtfsWriterException : Exception
 {
     public LtfsWriterException(string message) : base(message)
@@ -4212,7 +4219,7 @@ public sealed class FileSystemLtfsReadSink : ILtfsReadSink, IAsyncDisposable
     private sealed record VerificationState(IReadOnlyList<(LtfsHashAlgorithmKind Algorithm, string Expected)> ExpectedHashes, LtfsFileHashSet HashSet);
 }
 
-public sealed class ScsiLtfsWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCapableDevice, ILtfsMetadataExportDevice, ILtfsModeSenseDevice
+public sealed class ScsiLtfsWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCapableDevice, ILtfsMetadataExportDevice, ILtfsPartitionMamDevice, ILtfsModeSenseDevice
 {
     private readonly IScsiDrive drive;
 
@@ -4331,7 +4338,13 @@ public sealed class ScsiLtfsWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCap
         if (maximumBytes <= 0 || maximumBytes > int.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(maximumBytes));
 
-        Ensure(ReadCommand.TryExecute(drive, new ReadCommand(false, false, (uint)maximumBytes), out var result, out var data), result, "READ failed.");
+        var transportOk = ReadCommand.TryExecute(drive, new ReadCommand(false, false, (uint)maximumBytes), out var result, out var data);
+        if (!transportOk)
+            throw new InvalidOperationException("READ failed at transport level.");
+
+        if (!result.IsGood && !IsShortIncorrectLength(result, data))
+            Ensure(true, result, "READ failed.");
+
         return ValueTask.FromResult(data);
     }
 
@@ -4364,7 +4377,7 @@ public sealed class ScsiLtfsWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCap
             if (!ReadCommand.TryExecute(drive, new ReadCommand(false, false, (uint)blockSizeBytes), out var result, out var data))
                 throw new InvalidOperationException("READ failed at transport level.");
 
-            if (result.IsGood && data.Length > 0)
+            if ((result.IsGood || IsShortIncorrectLength(result, data)) && data.Length > 0)
             {
                 await stream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
                 continue;
@@ -4437,10 +4450,15 @@ public sealed class ScsiLtfsWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCap
 
     public ValueTask<IReadOnlyList<MamAttribute>> ReadMamAttributesAsync(CancellationToken cancellationToken = default)
     {
+        return ReadMamAttributesAsync(LtfsPartition.A, cancellationToken);
+    }
+
+    public ValueTask<IReadOnlyList<MamAttribute>> ReadMamAttributesAsync(LtfsPartition partition, CancellationToken cancellationToken = default)
+    {
         cancellationToken.ThrowIfCancellationRequested();
         Ensure(ReadAttributeCommand.TryExecute(
             drive,
-            new ReadAttributeCommand(ServiceAction: 0, VolumeNumber: 0, PartitionNumber: 0, FirstAttributeId: 0, AllocationLength: ushort.MaxValue),
+            new ReadAttributeCommand(ServiceAction: 0, VolumeNumber: 0, PartitionNumber: ToPartitionNumber(partition), FirstAttributeId: 0, AllocationLength: ushort.MaxValue),
             out var result,
             out var data), result, "READ ATTRIBUTE failed.");
         return ValueTask.FromResult<IReadOnlyList<MamAttribute>>(ParseMamAttributes(data));
@@ -4449,6 +4467,16 @@ public sealed class ScsiLtfsWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCap
     private static bool IsFilemark(ScsiCommandResult result)
     {
         return result.SenseData.Length >= 3 && (result.SenseData[2] & 0x80) != 0;
+    }
+
+    private static bool IsShortIncorrectLength(ScsiCommandResult result, ReadOnlySpan<byte> data)
+    {
+        return result.Success
+            && result.ScsiStatus == 0x02
+            && data.Length > 0
+            && result.SenseData.Length >= 3
+            && (result.SenseData[2] & 0x20) != 0
+            && (result.SenseData[2] & 0x0F) == 0;
     }
 
     private static byte ToPartitionNumber(LtfsPartition partition) => partition == LtfsPartition.A ? (byte)0 : (byte)1;

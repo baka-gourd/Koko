@@ -22,7 +22,7 @@ public readonly record struct EraseCommand(
         return ScsiCommandExecutor.TryExecuteNoData(
             drive,
             cdb,
-            DataDirection.Unspecified,
+            DataDirection.In,
             request.TimeoutSeconds,
             out result);
     }

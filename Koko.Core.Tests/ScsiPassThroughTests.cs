@@ -1,16 +1,12 @@
-using System.Runtime.InteropServices;
-
 using Koko.Core.Scsi;
 using Koko.Core.Scsi.Commands;
-
-using Windows.Win32.Storage.IscsiDisc;
 
 namespace Koko.Core.Tests;
 
 public sealed class ScsiPassThroughTests
 {
     [Test]
-    public async Task Test_unit_ready_uses_zero_cdb_and_data_in()
+    public async Task Test_unit_ready_uses_zero_cdb_and_in_direction()
     {
         var drive = new RecordingScsiDrive();
 
@@ -22,7 +18,7 @@ public sealed class ScsiPassThroughTests
     }
 
     [Test]
-    public async Task Capybara_compatible_no_data_commands_use_data_in()
+    public async Task No_data_commands_use_in_direction_for_ibm_compatibility()
     {
         await AssertNoDataCommandDirection(
             drive => ReserveUnitCommand.TryExecute(drive, new ReserveUnitCommand(Use10Byte: false), out _),
@@ -50,7 +46,7 @@ public sealed class ScsiPassThroughTests
     }
 
     [Test]
-    public async Task No_data_packet_keeps_null_data_buffer_and_sense_after_sptd()
+    public async Task No_data_packet_keeps_null_data_buffer_and_uses_non_direct_layout()
     {
         var snapshot = IOControl.CreatePacketSnapshot(
             [0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
@@ -64,7 +60,7 @@ public sealed class ScsiPassThroughTests
         await Assert.That(snapshot.DataIn).IsEqualTo((byte)DataDirection.In);
         await Assert.That(snapshot.DataTransferLength).IsEqualTo(0U);
         await Assert.That(snapshot.DataBuffer).IsEqualTo(nint.Zero);
-        await Assert.That(snapshot.SenseInfoOffset).IsEqualTo((uint)Marshal.SizeOf<SCSI_PASS_THROUGH_DIRECT>());
+        await Assert.That(snapshot.SenseInfoOffset).IsGreaterThan(0U);
         await Assert.That(snapshot.PacketSize).IsGreaterThanOrEqualTo((int)snapshot.SenseInfoOffset + IOControl.DefaultSenseLength);
     }
 

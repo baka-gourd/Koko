@@ -173,6 +173,8 @@ public sealed class LtfsVolumeScanner
 
 public sealed class LtfsVolumeDiscoveryService
 {
+    private const int LegacyProbeReadLimitBytes = 0x80000;
+
     private readonly ILtfsWriterDevice device;
 
     public LtfsVolumeDiscoveryService(ILtfsWriterDevice device)
@@ -189,18 +191,104 @@ public sealed class LtfsVolumeDiscoveryService
         var warnings = new List<string>();
         var operationId = Guid.NewGuid().ToString("N");
         var executor = new LtfsTapeCommandExecutor();
+        var effectiveWriterOptions = LtfsWriterService.ResolvePublicOptions(writerOptions);
+        LtfsLabel label;
         bool? detectedWorm;
 
         using (ScsiStartupUnitAttentionRetry.SuppressPowerOnReset(scopeName: "LTFS discovery startup"))
         {
-            writerOptions = await ResolveDiscoveryWriterOptionsAsync(writerOptions, warnings, cancellationToken).ConfigureAwait(false);
-            await ApplyEncryptionAsync(operationId, writerOptions, cancellationToken).ConfigureAwait(false);
+            await ApplyEncryptionAsync(operationId, effectiveWriterOptions, cancellationToken).ConfigureAwait(false);
             detectedWorm = await DetectWormAsync(cancellationToken).ConfigureAwait(false);
-            var vol1 = await ReadBlockAtAsync(executor, LtfsPartition.A, 0, writerOptions, cancellationToken).ConfigureAwait(false);
+            var vol1 = await ReadBlockAtAsync(executor, LtfsPartition.A, 0, 80, effectiveWriterOptions.TapeControl, cancellationToken).ConfigureAwait(false);
             ValidateVol1(vol1);
+            label = await ReadLabelAtFilemarkAsync(executor, LtfsPartition.A, 1, LegacyProbeReadLimitBytes, effectiveWriterOptions.TapeControl, cancellationToken).ConfigureAwait(false);
+            effectiveWriterOptions = effectiveWriterOptions with { BlockSizeBytes = label.BlockSize };
+            await device.SetBlockSizeAsync(label.BlockSize, cancellationToken).ConfigureAwait(false);
         }
 
-        return await DiscoverLegacyAsync(options, writerOptions, warnings, detectedWorm, executor, cancellationToken).ConfigureAwait(false);
+        var vciResult = await TryDiscoverFromVciAsync(options, effectiveWriterOptions, warnings, detectedWorm, executor, label, cancellationToken).ConfigureAwait(false);
+        if (vciResult is not null)
+            return vciResult;
+
+        return await DiscoverLegacyAsync(options, effectiveWriterOptions, warnings, detectedWorm, executor, label, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask<LtfsVolumeDiscoveryResult?> TryDiscoverFromVciAsync(
+        LtfsVolumeDiscoveryOptions options,
+        LtfsWriterOptions writerOptions,
+        List<string> warnings,
+        bool? detectedWorm,
+        LtfsTapeCommandExecutor executor,
+        LtfsLabel label,
+        CancellationToken cancellationToken)
+    {
+        if (device is not ILtfsPartitionMamDevice mamDevice)
+            return null;
+
+        var candidates = new List<(LtfsPartition Partition, LtfsVolumeCoherencyInformation Vci)>();
+        foreach (var partition in new[] { LtfsPartition.A, LtfsPartition.B })
+        {
+            try
+            {
+                var attributes = await mamDevice.ReadMamAttributesAsync(partition, cancellationToken).ConfigureAwait(false);
+                foreach (var attribute in attributes.Where(x => x.Id == LtfsVolumeCoherencyInformation.MamAttributeId))
+                {
+                    if (LtfsVolumeCoherencyInformation.TryParse(attribute.Value.Span, out var vci))
+                        candidates.Add((partition, vci));
+                    else
+                        warnings.Add($"VCI MAM attribute on partition {partition} is not parseable.");
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                warnings.Add($"VCI MAM read on partition {partition} failed: {ex.Message}");
+            }
+        }
+
+        if (candidates.Count == 0)
+            return null;
+
+        if (options.ExpectedVolumeUuid is { } expected && !options.AllowForeignVolume && candidates.All(x => x.Vci.VolumeUuid != expected))
+            throw new LtfsWriterException("LTFS VCI discovery found a foreign volume.");
+
+        if (candidates.Select(x => x.Vci.Generation).Distinct().Skip(1).Any())
+            warnings.Add("VCI MAM attributes report different generations; trying the highest generation first.");
+
+        foreach (var candidate in candidates
+                     .Where(x => options.ExpectedVolumeUuid is null || options.AllowForeignVolume || x.Vci.VolumeUuid == options.ExpectedVolumeUuid.Value)
+                     .OrderByDescending(x => x.Vci.Generation)
+                     .ThenBy(x => x.Partition == LtfsPartition.A ? 0 : 1))
+        {
+            try
+            {
+                var payload = await ReadToFilemarkAtAsync(executor, candidate.Partition, candidate.Vci.IndexBlock, writerOptions, cancellationToken).ConfigureAwait(false);
+                var index = ReadAndValidateIndex(payload, writerOptions);
+                if (index.VolumeUuid != candidate.Vci.VolumeUuid)
+                    throw new LtfsWriterException("VCI points to an index with a different volume UUID.");
+                if (index.GenerationNumber != candidate.Vci.Generation)
+                    throw new LtfsWriterException("VCI points to an index with a different generation.");
+                if (!MatchesExpected(index, options))
+                    throw new LtfsWriterException("LTFS VCI discovery found a foreign volume.");
+
+                var dataPartition = InferDataPartition(index, candidate.Partition);
+                var append = await LocateEndOfDataAsync(executor, dataPartition, writerOptions, cancellationToken).ConfigureAwait(false);
+                var stableDataBlock = index.Location.Partition == dataPartition ? index.Location.StartBlock : index.PreviousGenerationLocation.StartBlock;
+                var dirty = append.Block > stableDataBlock;
+                if (dirty)
+                    warnings.Add("Data partition EOD is after the VCI-discovered checkpoint; unindexed data may exist.");
+
+                var source = candidate.Partition == LtfsPartition.A
+                    ? LtfsIndexDiscoverySource.VciIndexPartition
+                    : LtfsIndexDiscoverySource.VciDataPartition;
+                return new LtfsVolumeDiscoveryResult(index, label, append, source, dirty, IsWorm(index, detectedWorm), false, warnings);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                warnings.Add($"VCI candidate {candidate.Partition}{candidate.Vci.IndexBlock} generation {candidate.Vci.Generation} failed: {ex.Message}");
+            }
+        }
+
+        return null;
     }
 
     private async ValueTask<LtfsVolumeDiscoveryResult> DiscoverLegacyAsync(
@@ -209,19 +297,16 @@ public sealed class LtfsVolumeDiscoveryService
         List<string> warnings,
         bool? detectedWorm,
         LtfsTapeCommandExecutor executor,
+        LtfsLabel label,
         CancellationToken cancellationToken)
     {
-        var label = await ReadLabelAtFilemarkAsync(executor, LtfsPartition.A, 1, writerOptions, cancellationToken).ConfigureAwait(false);
-        writerOptions = writerOptions with { BlockSizeBytes = label.BlockSize };
-        await device.SetBlockSizeAsync(label.BlockSize, cancellationToken).ConfigureAwait(false);
-
         var indexPartition = LtfsPartition.A;
         var dataPartition = LtfsPartition.B;
         if (label.LocationPartition == label.DataPartition && label.IndexPartition != label.DataPartition)
         {
             dataPartition = LtfsPartition.A;
             indexPartition = LtfsPartition.B;
-            label = await ReadLabelAtFilemarkAsync(executor, indexPartition, 1, writerOptions, cancellationToken).ConfigureAwait(false);
+            label = await ReadLabelAtFilemarkAsync(executor, indexPartition, 1, writerOptions.BlockSizeBytes, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
         }
         else if (label.IndexPartition == label.DataPartition)
         {
@@ -232,8 +317,15 @@ public sealed class LtfsVolumeDiscoveryService
         if (indexPartition == dataPartition)
             return await DiscoverLegacySinglePartitionAsync(options, writerOptions, warnings, detectedWorm, executor, label, dataPartition, cancellationToken).ConfigureAwait(false);
 
-        var indexPayload = await ReadPayloadAfterFilemarkAsync(executor, indexPartition, 3, writerOptions, cancellationToken).ConfigureAwait(false);
-        var index = ReadAndValidateIndex(indexPayload, writerOptions);
+        var index = await ReadPayloadAfterFilemarkAsync(
+            executor,
+            indexPartition,
+            3,
+            writerOptions.BlockSizeBytes,
+            writerOptions.TapeControl,
+            payload => ReadAndValidateIndex(payload, writerOptions),
+            "LTFS index",
+            cancellationToken).ConfigureAwait(false);
         if (!MatchesExpected(index, options))
             throw new LtfsWriterException("LTFS legacy discovery found a foreign volume.");
 
@@ -260,8 +352,15 @@ public sealed class LtfsVolumeDiscoveryService
         if (eod.FileNumber is not { } fileNumber || fileNumber <= 1)
             throw new LtfsWriterException("LTFS legacy discovery could not locate the previous single-partition index filemark.");
 
-        var indexPayload = await ReadPayloadAfterFilemarkAsync(executor, dataPartition, fileNumber - 1, writerOptions, cancellationToken).ConfigureAwait(false);
-        var index = ReadAndValidateIndex(indexPayload, writerOptions);
+        var index = await ReadPayloadAfterFilemarkAsync(
+            executor,
+            dataPartition,
+            fileNumber - 1,
+            writerOptions.BlockSizeBytes,
+            writerOptions.TapeControl,
+            payload => ReadAndValidateIndex(payload, writerOptions),
+            "LTFS index",
+            cancellationToken).ConfigureAwait(false);
         if (!MatchesExpected(index, options))
             throw new LtfsWriterException("LTFS legacy discovery found a foreign volume.");
 
@@ -314,8 +413,8 @@ public sealed class LtfsVolumeDiscoveryService
         {
             try
             {
-                var position = await LocateFilemarkAsync(executor, partition, partition == LtfsPartition.A ? 3UL : 1UL, writerOptions, cancellationToken).ConfigureAwait(false);
-                var payload = await ReadToFilemarkAtCurrentPositionAsync(executor, position, writerOptions, cancellationToken).ConfigureAwait(false);
+                var position = await LocateFilemarkAsync(executor, partition, partition == LtfsPartition.A ? 3UL : 1UL, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
+                var payload = await ReadToFilemarkAtCurrentPositionAsync(executor, position, writerOptions.BlockSizeBytes, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
                 var index = ReadAndValidateIndex(payload, writerOptions);
                 if (!MatchesExpected(index, options))
                     continue;
@@ -354,8 +453,8 @@ public sealed class LtfsVolumeDiscoveryService
             if (eod.FileNumber is not { } fileNumber || fileNumber <= 1)
                 return null;
 
-            var position = await LocateFilemarkAsync(executor, LtfsPartition.B, fileNumber - 1, writerOptions, cancellationToken).ConfigureAwait(false);
-            var payload = await ReadToFilemarkAtCurrentPositionAsync(executor, position, writerOptions, cancellationToken).ConfigureAwait(false);
+            var position = await LocateFilemarkAsync(executor, LtfsPartition.B, fileNumber - 1, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
+            var payload = await ReadToFilemarkAtCurrentPositionAsync(executor, position, writerOptions.BlockSizeBytes, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
             var index = ReadAndValidateIndex(payload, writerOptions);
             if (!MatchesExpected(index, options))
                 return null;
@@ -401,28 +500,61 @@ public sealed class LtfsVolumeDiscoveryService
         LtfsTapeCommandExecutor executor,
         LtfsPartition partition,
         ulong filemark,
-        LtfsWriterOptions writerOptions,
+        long readLimitBytes,
+        LtfsTapeSessionControl? tapeControl,
         CancellationToken cancellationToken)
     {
-        var payload = await ReadPayloadAfterFilemarkAsync(executor, partition, filemark, writerOptions, cancellationToken).ConfigureAwait(false);
-        return LtfsLabelReader.FromArray(payload);
+        return await ReadPayloadAfterFilemarkAsync(
+            executor,
+            partition,
+            filemark,
+            readLimitBytes,
+            tapeControl,
+            payload => LtfsLabelReader.FromArray(payload),
+            "LTFS label",
+            cancellationToken).ConfigureAwait(false);
     }
 
-    private async ValueTask<byte[]> ReadPayloadAfterFilemarkAsync(
+    private async ValueTask<T> ReadPayloadAfterFilemarkAsync<T>(
         LtfsTapeCommandExecutor executor,
         LtfsPartition partition,
         ulong filemark,
-        LtfsWriterOptions writerOptions,
+        long readLimitBytes,
+        LtfsTapeSessionControl? tapeControl,
+        Func<byte[], T> readPayload,
+        string payloadKind,
         CancellationToken cancellationToken)
     {
-        _ = await LocateFilemarkAsync(executor, partition, filemark, writerOptions, cancellationToken).ConfigureAwait(false);
-        var payloadStart = await AdvancePastFilemarkAsync(executor, writerOptions, cancellationToken).ConfigureAwait(false);
-        return await ReadToFilemarkAtCurrentPositionAsync(executor, payloadStart, writerOptions, cancellationToken).ConfigureAwait(false);
+        Exception? directFailure = null;
+        try
+        {
+            var directStart = await LocateFilemarkAsync(executor, partition, filemark, tapeControl, cancellationToken).ConfigureAwait(false);
+            var payload = await ReadToFilemarkAtCurrentPositionAsync(executor, directStart, readLimitBytes, tapeControl, cancellationToken).ConfigureAwait(false);
+            return readPayload(payload);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            directFailure = ex;
+        }
+
+        try
+        {
+            _ = await LocateFilemarkAsync(executor, partition, filemark, tapeControl, cancellationToken).ConfigureAwait(false);
+            var payloadStart = await AdvancePastFilemarkAsync(executor, tapeControl, cancellationToken).ConfigureAwait(false);
+            var payload = await ReadToFilemarkAtCurrentPositionAsync(executor, payloadStart, readLimitBytes, tapeControl, cancellationToken).ConfigureAwait(false);
+            return readPayload(payload);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new LtfsWriterException(
+                $"LTFS discovery could not read {payloadKind} after filemark {partition}{filemark}. Direct read failed: {directFailure?.Message}; filemark-advance read failed: {ex.Message}",
+                ex);
+        }
     }
 
     private async ValueTask<LtfsTapePosition> AdvancePastFilemarkAsync(
         LtfsTapeCommandExecutor executor,
-        LtfsWriterOptions writerOptions,
+        LtfsTapeSessionControl? tapeControl,
         CancellationToken cancellationToken)
     {
         LtfsTapePosition? position = null;
@@ -440,7 +572,7 @@ public sealed class LtfsVolumeDiscoveryService
             LtfsTapeBarrierKind.HardBarrier,
             AffectsPosition: false,
             ReadPositionAsync: ct => device.ReadPositionAsync(ct)));
-        await executor.ExecuteAsync(queue, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
+        await executor.ExecuteAsync(queue, tapeControl, cancellationToken).ConfigureAwait(false);
         if (position is null)
             throw new LtfsWriterException("LTFS discovery filemark advance did not return a position.");
         executor.SetExpectedPosition(position);
@@ -494,27 +626,28 @@ public sealed class LtfsVolumeDiscoveryService
             ExpectedEndPosition: target,
             ReadPositionAsync: ct => device.ReadPositionAsync(ct)));
         await executor.ExecuteAsync(queue, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
-        return await ReadToFilemarkAtCurrentPositionAsync(executor, target, writerOptions, cancellationToken).ConfigureAwait(false);
+        return await ReadToFilemarkAtCurrentPositionAsync(executor, target, writerOptions.BlockSizeBytes, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
     }
 
     private async ValueTask<byte[]> ReadToFilemarkAtCurrentPositionAsync(
         LtfsTapeCommandExecutor executor,
         LtfsTapePosition position,
-        LtfsWriterOptions writerOptions,
+        long readLimitBytes,
+        LtfsTapeSessionControl? tapeControl,
         CancellationToken cancellationToken)
     {
         byte[]? payload = null;
         var queue = new LtfsTapeCommandQueue();
         queue.Enqueue(new LtfsTapeCommand(
             LtfsTapeCommandKind.ReadDataBlock,
-            async ct => payload = await device.ReadToFilemarkAsync(writerOptions.BlockSizeBytes, ct).ConfigureAwait(false),
+            async ct => payload = await device.ReadToFilemarkAsync(readLimitBytes, ct).ConfigureAwait(false),
             LtfsTapeCommandPriority.Data,
             LtfsTapeBarrierKind.HardBarrier,
             ExpectedStartPosition: position,
             ReadPositionAsync: ct => device.ReadPositionAsync(ct)));
         if (!executor.PositionKnown || executor.ExpectedPosition is null || executor.ExpectedPosition.Partition != position.Partition || executor.ExpectedPosition.Block != position.Block)
             executor.SetExpectedPosition(position);
-        await executor.ExecuteAsync(queue, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
+        await executor.ExecuteAsync(queue, tapeControl, cancellationToken).ConfigureAwait(false);
         return payload ?? throw new LtfsWriterException($"LTFS discovery read-to-filemark at {position.Partition}{position.Block} returned no payload.");
     }
 
@@ -523,6 +656,17 @@ public sealed class LtfsVolumeDiscoveryService
         LtfsPartition partition,
         ulong block,
         LtfsWriterOptions writerOptions,
+        CancellationToken cancellationToken)
+    {
+        return await ReadBlockAtAsync(executor, partition, block, writerOptions.BlockSizeBytes, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask<byte[]> ReadBlockAtAsync(
+        LtfsTapeCommandExecutor executor,
+        LtfsPartition partition,
+        ulong block,
+        long readLimitBytes,
+        LtfsTapeSessionControl? tapeControl,
         CancellationToken cancellationToken)
     {
         byte[]? data = null;
@@ -537,13 +681,13 @@ public sealed class LtfsVolumeDiscoveryService
             ReadPositionAsync: ct => device.ReadPositionAsync(ct)));
         queue.Enqueue(new LtfsTapeCommand(
             LtfsTapeCommandKind.ReadDataBlock,
-            async ct => data = await device.ReadBlockAsync(writerOptions.BlockSizeBytes, ct).ConfigureAwait(false),
+            async ct => data = await device.ReadBlockAsync(readLimitBytes, ct).ConfigureAwait(false),
             LtfsTapeCommandPriority.Data,
             LtfsTapeBarrierKind.None,
             ExpectedStartPosition: target,
             ExpectedEndPosition: target with { Block = target.Block + 1 },
             ReadPositionAsync: ct => device.ReadPositionAsync(ct)));
-        await executor.ExecuteAsync(queue, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
+        await executor.ExecuteAsync(queue, tapeControl, cancellationToken).ConfigureAwait(false);
         return data ?? throw new LtfsWriterException($"LTFS discovery read at {partition}{block} returned no data.");
     }
 
@@ -579,7 +723,7 @@ public sealed class LtfsVolumeDiscoveryService
         LtfsTapeCommandExecutor executor,
         LtfsPartition partition,
         ulong filemark,
-        LtfsWriterOptions writerOptions,
+        LtfsTapeSessionControl? tapeControl,
         CancellationToken cancellationToken)
     {
         LtfsTapePosition? position = null;
@@ -597,7 +741,7 @@ public sealed class LtfsVolumeDiscoveryService
             LtfsTapeBarrierKind.HardBarrier,
             AffectsPosition: false,
             ReadPositionAsync: ct => device.ReadPositionAsync(ct)));
-        await executor.ExecuteAsync(queue, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
+        await executor.ExecuteAsync(queue, tapeControl, cancellationToken).ConfigureAwait(false);
         if (position is null)
             throw new LtfsWriterException($"LTFS discovery locate filemark {partition}{filemark} did not return a position.");
         executor.SetExpectedPosition(position);
@@ -634,6 +778,14 @@ public sealed class LtfsVolumeDiscoveryService
     private static bool IsWorm(LtfsIndex index, bool? detectedWorm)
     {
         return detectedWorm == true || index.VolumeLockState == LtfsVolumeLockState.PermLocked;
+    }
+
+    private static LtfsPartition InferDataPartition(LtfsIndex index, LtfsPartition vciPartition)
+    {
+        if (index.Location.Partition == LtfsPartition.B || index.PreviousGenerationLocation.Partition == LtfsPartition.B)
+            return LtfsPartition.B;
+
+        return vciPartition == LtfsPartition.B ? LtfsPartition.B : LtfsPartition.A;
     }
 
 }

@@ -29,7 +29,7 @@ public readonly record struct LoadUnloadCommand(
         return ScsiCommandExecutor.TryExecuteNoData(
             drive,
             cdb,
-            DataDirection.Unspecified,
+            DataDirection.In,
             request.TimeoutSeconds,
             out result);
     }

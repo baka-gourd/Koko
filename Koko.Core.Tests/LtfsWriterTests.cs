@@ -355,8 +355,139 @@ public sealed class LtfsWriterTests
         await Assert.That(result.AppendPoint.Block).IsEqualTo(50UL);
         await Assert.That(result.DirtyAppendDetected).IsTrue();
         await Assert.That(result.Graph).IsNull();
-        await Assert.That(string.Join("|", device.Events)).Contains("Locate:A:0|ReadBlock:A:0|LocateFM:A:1|ReadPosition:A:1|AdvanceFM:A:2|ReadPosition:A:2|ReadToFM:A:2|SetBlockSize:8|LocateFM:A:3|ReadPosition:A:4|AdvanceFM:A:5|ReadPosition:A:5|ReadToFM:A:5|LocateEOD:B|ReadPosition:B:50");
-        await Assert.That(string.Join("|", device.Events)).DoesNotContain("ReadMam");
+        await Assert.That(device.ReadBlockLimits).Contains(80L);
+        await Assert.That(string.Join("|", device.Events)).Contains("ReadMam:A|ReadMam:B");
+        await Assert.That(string.Join("|", device.Events)).Contains("Locate:A:0|ReadBlock:A:0|LocateFM:A:1");
+        await Assert.That(string.Join("|", device.Events)).Contains("ReadToFM:A:1|ReadPosition:A:1|LocateFM:A:1|ReadPosition:A:1|AdvanceFM:A:2|ReadPosition:A:2|ReadToFM:A:2");
+        await Assert.That(string.Join("|", device.Events)).Contains("SetBlockSize:8|ReadMam:A|ReadMam:B");
+        await Assert.That(string.Join("|", device.Events)).Contains("ReadToFM:A:4|ReadPosition:A:4|LocateFM:A:3|ReadPosition:A:4|AdvanceFM:A:5|ReadPosition:A:5|ReadToFM:A:5|LocateEOD:B|ReadPosition:B:50");
+    }
+
+    [Test]
+    public async Task Discovery_uses_vci_index_partition_fast_path_when_valid()
+    {
+        var index = CreateIndex();
+        index.Location = new LtfsLocation { Partition = LtfsPartition.A, StartBlock = 5 };
+        index.PreviousGenerationLocation = new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 42 };
+        var label = CreateLabel(index.VolumeUuid, LtfsPartition.A);
+        var device = new RecordingWriterDevice
+        {
+            DataEodBlock = 42,
+            PartitionMamAttributes =
+            {
+                [LtfsPartition.A] = [new LtfsVolumeCoherencyInformation(index.GenerationNumber, 5, index.VolumeUuid).ToMamAttribute()],
+            },
+        };
+        SetupLegacyTwoPartition(device, label, index);
+
+        var result = await new LtfsVolumeDiscoveryService(device).DiscoverAsync(
+            new LtfsVolumeDiscoveryOptions(),
+            new LtfsWriterOptions(BlockSizeBytes: 8));
+
+        await Assert.That(result.Source).IsEqualTo(LtfsIndexDiscoverySource.VciIndexPartition);
+        await Assert.That(result.Label).IsNotNull();
+        await Assert.That(result.Index.VolumeUuid).IsEqualTo(index.VolumeUuid);
+        await Assert.That(string.Join("|", device.Events)).Contains("SetBlockSize:8|ReadMam:A|ReadMam:B|Locate:A:5|ReadToFM:A:5|LocateEOD:B|ReadPosition:B:42");
+        await Assert.That(string.Join("|", device.Events)).DoesNotContain("LocateFM:A:3");
+    }
+
+    [Test]
+    public async Task Discovery_uses_vci_data_partition_fast_path_when_valid()
+    {
+        var index = CreateIndex();
+        index.Location = new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 42 };
+        index.PreviousGenerationLocation = new LtfsLocation { Partition = LtfsPartition.A, StartBlock = 5 };
+        var label = CreateLabel(index.VolumeUuid, LtfsPartition.A);
+        var device = new RecordingWriterDevice
+        {
+            DataEodBlock = 42,
+            PartitionMamAttributes =
+            {
+                [LtfsPartition.B] = [new LtfsVolumeCoherencyInformation(index.GenerationNumber, 42, index.VolumeUuid).ToMamAttribute()],
+            },
+        };
+        SetupLegacyTwoPartition(device, label, index);
+        device.IndexPayloads[(LtfsPartition.B, 42)] = WriteIndex(index);
+
+        var result = await new LtfsVolumeDiscoveryService(device).DiscoverAsync(
+            new LtfsVolumeDiscoveryOptions(),
+            new LtfsWriterOptions(BlockSizeBytes: 8));
+
+        await Assert.That(result.Source).IsEqualTo(LtfsIndexDiscoverySource.VciDataPartition);
+        await Assert.That(result.Label).IsNotNull();
+        await Assert.That(result.Index.Location.Partition).IsEqualTo(LtfsPartition.B);
+        await Assert.That(string.Join("|", device.Events)).Contains("SetBlockSize:8|ReadMam:A|ReadMam:B|Locate:B:42|ReadToFM:B:42|LocateEOD:B");
+        await Assert.That(string.Join("|", device.Events)).DoesNotContain("LocateFM:A:3");
+    }
+
+    [Test]
+    public async Task Discovery_falls_back_to_legacy_when_vci_points_to_invalid_index()
+    {
+        var index = CreateIndex();
+        index.Location = new LtfsLocation { Partition = LtfsPartition.A, StartBlock = 5 };
+        index.PreviousGenerationLocation = new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 42 };
+        var label = CreateLabel(index.VolumeUuid, LtfsPartition.A);
+        var device = new RecordingWriterDevice
+        {
+            DataEodBlock = 42,
+            PartitionMamAttributes =
+            {
+                [LtfsPartition.A] = [new LtfsVolumeCoherencyInformation(index.GenerationNumber + 1, 99, index.VolumeUuid).ToMamAttribute()],
+            },
+        };
+        SetupLegacyTwoPartition(device, label, index);
+
+        var result = await new LtfsVolumeDiscoveryService(device).DiscoverAsync(
+            new LtfsVolumeDiscoveryOptions(),
+            new LtfsWriterOptions(BlockSizeBytes: 8));
+
+        await Assert.That(result.Source).IsEqualTo(LtfsIndexDiscoverySource.LabelLayout);
+        await Assert.That(result.Warnings.Any(x => x.Contains("VCI candidate A99", StringComparison.Ordinal))).IsTrue();
+        await Assert.That(string.Join("|", device.Events)).Contains("ReadMam:A|ReadMam:B|Locate:A:99|ReadToFM:A:99|ReadPosition:A:99|LocateFM:A:3");
+    }
+
+    [Test]
+    public async Task Discovery_uses_ibm_filemark_position_without_advance()
+    {
+        var index = CreateIndex();
+        index.Location = new LtfsLocation { Partition = LtfsPartition.A, StartBlock = 5 };
+        index.PreviousGenerationLocation = new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 42 };
+        var label = CreateLabel(index.VolumeUuid, LtfsPartition.A);
+        var device = new RecordingWriterDevice
+        {
+            DataEodBlock = 42,
+            LocateFilemarkStopsAfterFilemark = true,
+        };
+        SetupLegacyTwoPartition(device, label, index);
+
+        var result = await new LtfsVolumeDiscoveryService(device).DiscoverAsync(
+            new LtfsVolumeDiscoveryOptions(),
+            new LtfsWriterOptions(BlockSizeBytes: 8));
+
+        await Assert.That(result.Source).IsEqualTo(LtfsIndexDiscoverySource.LabelLayout);
+        await Assert.That(string.Join("|", device.Events)).Contains("LocateFM:A:1|ReadPosition:A:2|ReadToFM:A:2|SetBlockSize:8|ReadMam:A|ReadMam:B|LocateFM:A:3|ReadPosition:A:5|ReadToFM:A:5");
+        await Assert.That(string.Join("|", device.Events)).DoesNotContain("AdvanceFM");
+    }
+
+    [Test]
+    public async Task Discovery_uses_label_block_size_when_options_are_missing_or_wrong()
+    {
+        var index = CreateIndex();
+        index.Location = new LtfsLocation { Partition = LtfsPartition.A, StartBlock = 5 };
+        index.PreviousGenerationLocation = new LtfsLocation { Partition = LtfsPartition.B, StartBlock = 42 };
+        var label = CreateLabel(index.VolumeUuid, LtfsPartition.A);
+        label.BlockSize = 4096;
+        var device = new RecordingWriterDevice { DataEodBlock = 42 };
+        SetupLegacyTwoPartition(device, label, index);
+
+        var result = await new LtfsVolumeDiscoveryService(device).DiscoverAsync(
+            new LtfsVolumeDiscoveryOptions(),
+            new LtfsWriterOptions(BlockSizeBytes: 123));
+
+        await Assert.That(result.Source).IsEqualTo(LtfsIndexDiscoverySource.LabelLayout);
+        await Assert.That(device.ReadBlockLimits).Contains(80L);
+        await Assert.That(string.Join("|", device.Events)).Contains("SetBlockSize:4096");
+        await Assert.That(device.ReadToFilemarkLimits).Contains(4096L);
     }
 
     [Test]
@@ -386,7 +517,7 @@ public sealed class LtfsWriterTests
     }
 
     [Test]
-    public async Task Discovery_options_do_not_select_scan_or_vci_strategy()
+    public async Task Discovery_options_fall_back_to_legacy_when_no_partition_vci_exists()
     {
         var index = CreateIndex();
         index.Location = new LtfsLocation { Partition = LtfsPartition.A, StartBlock = 5 };
@@ -405,8 +536,8 @@ public sealed class LtfsWriterTests
             new LtfsWriterOptions(BlockSizeBytes: 8));
 
         await Assert.That(result.Source).IsEqualTo(LtfsIndexDiscoverySource.LabelLayout);
-        await Assert.That(string.Join("|", device.Events)).Contains("LocateFM:A:3|ReadPosition:A:4|AdvanceFM:A:5|ReadPosition:A:5|ReadToFM:A:5");
-        await Assert.That(string.Join("|", device.Events)).DoesNotContain("ReadMam");
+        await Assert.That(string.Join("|", device.Events)).Contains("ReadMam:A|ReadMam:B");
+        await Assert.That(string.Join("|", device.Events)).Contains("ReadToFM:A:4|ReadPosition:A:4|LocateFM:A:3|ReadPosition:A:4|AdvanceFM:A:5|ReadPosition:A:5|ReadToFM:A:5");
     }
 
     [Test]
@@ -436,7 +567,7 @@ public sealed class LtfsWriterTests
 
         await Assert.That(result.Source).IsEqualTo(LtfsIndexDiscoverySource.DataCheckpointScan);
         await Assert.That(result.AppendPoint.Block).IsEqualTo(8UL);
-        await Assert.That(string.Join("|", device.Events)).Contains("LocateEOD:A|ReadPosition:A:8|LocateFM:A:3|ReadPosition:A:4|AdvanceFM:A:5|ReadPosition:A:5|ReadToFM:A:5");
+        await Assert.That(string.Join("|", device.Events)).Contains("LocateEOD:A|ReadPosition:A:8|LocateFM:A:3|ReadPosition:A:4|ReadToFM:A:4|ReadPosition:A:4|LocateFM:A:3|ReadPosition:A:4|AdvanceFM:A:5|ReadPosition:A:5|ReadToFM:A:5");
     }
 
     [Test]
@@ -472,7 +603,7 @@ public sealed class LtfsWriterTests
             new LtfsVolumeDiscoveryOptions(),
             new LtfsWriterOptions(BlockSizeBytes: 8))).ThrowsException();
 
-        await Assert.That(string.Join("|", device.Events)).DoesNotContain("ReadMam");
+        await Assert.That(string.Join("|", device.Events)).Contains("ReadMam:A|ReadMam:B");
     }
 
     [Test]
@@ -1248,17 +1379,21 @@ public sealed class LtfsWriterTests
         return LogSenseResponse.FromRaw(raw);
     }
 
-    private sealed class RecordingWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCapableDevice, ILtfsMetadataExportDevice
+    private sealed class RecordingWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCapableDevice, ILtfsMetadataExportDevice, ILtfsPartitionMamDevice
     {
         public List<string> Events { get; } = [];
+        public List<long> ReadBlockLimits { get; } = [];
+        public List<long> ReadToFilemarkLimits { get; } = [];
         public Dictionary<(LtfsPartition Partition, long Block), byte[]> Blocks { get; } = [];
         public Dictionary<(LtfsPartition Partition, ulong Block), byte[]> IndexPayloads { get; } = [];
         public Dictionary<(LtfsPartition Partition, ulong Filemark), ulong> FilemarkPayloadStarts { get; } = [];
+        public Dictionary<LtfsPartition, IReadOnlyList<MamAttribute>> PartitionMamAttributes { get; init; } = [];
         public LtfsTapePosition Position { get; set; } = new(LtfsPartition.A, 0);
         public ulong? DataEodBlock { get; set; }
         public ulong? IndexEodBlock { get; set; }
         public ulong? DataEodFileNumber { get; set; }
         public ulong? IndexEodFileNumber { get; set; }
+        public bool LocateFilemarkStopsAfterFilemark { get; set; }
         public bool FailWrites { get; set; }
         public bool FailNextWriteAfterAdvance { get; set; }
         public int ThrowVolumeOverflowOnWriteNumber { get; set; }
@@ -1326,7 +1461,7 @@ public sealed class LtfsWriterTests
         public ValueTask LocateFilemarkAsync(LtfsPartition partition, ulong filemark, CancellationToken cancellationToken = default)
         {
             var block = FilemarkPayloadStarts.TryGetValue((partition, filemark), out var payloadStart)
-                ? payloadStart - 1
+                ? LocateFilemarkStopsAfterFilemark ? payloadStart : payloadStart - 1
                 : filemark;
             Position = new LtfsTapePosition(partition, block, filemark);
             Events.Add($"LocateFM:{partition}:{filemark}");
@@ -1341,6 +1476,7 @@ public sealed class LtfsWriterTests
 
         public ValueTask<byte[]> ReadBlockAsync(long maximumBytes, CancellationToken cancellationToken = default)
         {
+            ReadBlockLimits.Add(maximumBytes);
             Events.Add($"ReadBlock:{Position.Partition}:{Position.Block}");
             var data = Blocks[(Position.Partition, checked((long)Position.Block))];
             Position = Position with { Block = Position.Block + 1 };
@@ -1367,6 +1503,7 @@ public sealed class LtfsWriterTests
 
         public ValueTask<byte[]> ReadToFilemarkAsync(long blockSizeBytes, CancellationToken cancellationToken = default)
         {
+            ReadToFilemarkLimits.Add(blockSizeBytes);
             Events.Add($"ReadToFM:{Position.Partition}:{Position.Block}");
             return ValueTask.FromResult(IndexPayloads[(Position.Partition, Position.Block)]);
         }
@@ -1427,6 +1564,14 @@ public sealed class LtfsWriterTests
         public ValueTask<IReadOnlyList<MamAttribute>> ReadMamAttributesAsync(CancellationToken cancellationToken = default)
         {
             return ValueTask.FromResult(MamAttributes);
+        }
+
+        public ValueTask<IReadOnlyList<MamAttribute>> ReadMamAttributesAsync(LtfsPartition partition, CancellationToken cancellationToken = default)
+        {
+            Events.Add($"ReadMam:{partition}");
+            return ValueTask.FromResult(PartitionMamAttributes.TryGetValue(partition, out var attributes)
+                ? attributes
+                : Array.Empty<MamAttribute>());
         }
 
         public ValueTask<byte[]?> ReadCartridgeMemoryAsync(CancellationToken cancellationToken = default)

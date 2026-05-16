@@ -26,4 +26,10 @@
     <Folder Include="Exceptions\" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\Docs\**\*">
+      <LinkBase>Docs</LinkBase>
+    </None>
+  </ItemGroup>
+
 </Project>

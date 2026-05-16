@@ -1,4 +1,4 @@
-﻿<Window x:Class="Koko.DebugUI.MainWindow"
+<Window x:Class="Koko.DebugUI.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -10,7 +10,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="160" />
+            <RowDefinition Height="240" />
         </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="340" />
@@ -32,6 +32,7 @@
                 <TextBlock Text="Real SCSI Tape" FontWeight="SemiBold" Margin="0,0,0,8" />
                 <Button Content="Refresh SCSI Tape Drives" Click="RefreshDrives_Click" Height="32" />
                 <ComboBox x:Name="DriveComboBox" DisplayMemberPath="DisplayName" Margin="0,8,0,8" Height="28" />
+                <Button Content="Show TUR Packet HexDump" Click="ShowTurPacketHexDump_Click" Height="32" Margin="0,0,0,8" />
                 <Button Content="Read Index Partition Schema" Click="ReadIndexPartitionSchema_Click" Height="32" />
                 <TextBlock Margin="0,8,0,0" TextWrapping="Wrap" Foreground="DimGray" Text="Reads from the selected real LTO drive using Core LTFS device interfaces. This is non-destructive." />
 
@@ -49,10 +50,45 @@
         </Border>
 
         <Border Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" BorderBrush="#D0D7DE" BorderThickness="1" CornerRadius="4" Margin="0,12,0,0">
-            <DockPanel>
-                <TextBlock DockPanel.Dock="Top" Text="Log" FontWeight="SemiBold" Margin="10,8,10,4" />
-                <TextBox x:Name="LogTextBox" Margin="10,0,10,10" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" />
-            </DockPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="2*" />
+                    <ColumnDefinition Width="12" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <DockPanel Grid.Column="0">
+                    <TextBlock DockPanel.Dock="Top" Text="SCSI Command Details" FontWeight="SemiBold" Margin="10,8,10,4" />
+                    <DataGrid x:Name="CommandDetailsGrid"
+                              Margin="10,0,0,10"
+                              AutoGenerateColumns="False"
+                              CanUserAddRows="False"
+                              CanUserDeleteRows="False"
+                              IsReadOnly="True"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="Horizontal"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Auto">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="70" />
+                            <DataGridTextColumn Header="Command" Binding="{Binding Command}" Width="150" />
+                            <DataGridTextColumn Header="CDB" Binding="{Binding Cdb}" Width="180" />
+                            <DataGridTextColumn Header="Dir" Binding="{Binding Direction}" Width="70" />
+                            <DataGridTextColumn Header="Len" Binding="{Binding DataLength}" Width="55" />
+                            <DataGridCheckBoxColumn Header="OK" Binding="{Binding Success}" Width="45" />
+                            <DataGridTextColumn Header="Status" Binding="{Binding ScsiStatus}" Width="70" />
+                            <DataGridTextColumn Header="Bytes" Binding="{Binding BytesReturned}" Width="70" />
+                            <DataGridTextColumn Header="Transport" Binding="{Binding TransportError}" Width="220" />
+                            <DataGridTextColumn Header="Sense" Binding="{Binding Sense}" Width="260" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </DockPanel>
+
+                <DockPanel Grid.Column="2">
+                    <TextBlock DockPanel.Dock="Top" Text="Log" FontWeight="SemiBold" Margin="0,8,10,4" />
+                    <TextBox x:Name="LogTextBox" Margin="0,0,10,10" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" />
+                </DockPanel>
+            </Grid>
         </Border>
     </Grid>
 </Window>
