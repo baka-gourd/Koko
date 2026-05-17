@@ -3,9 +3,9 @@ namespace Koko.Core.Scsi.Commands;
 public readonly record struct SetCapacityCommand(
     bool Immediate,
     ushort CapacityProportionValue,
-    uint TimeoutSeconds = 60)
+    uint TimeoutSeconds = 600)
 {
-    public SetCapacityCommand() : this(false, 0, 60)
+    public SetCapacityCommand() : this(false, 0, 600)
     {
     }
 

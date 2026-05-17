@@ -2,9 +2,9 @@ namespace Koko.Core.Scsi.Commands;
 
 public readonly record struct ReportTargetPortGroupsCommand(
     uint AllocationLength,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReportTargetPortGroupsCommand() : this(0, 10)
+    public ReportTargetPortGroupsCommand() : this(0, 600)
     {
     }
 

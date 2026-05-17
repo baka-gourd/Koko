@@ -3,9 +3,9 @@ namespace Koko.Core.Scsi.Commands;
 public readonly record struct VerifyCommand(
     bool Fixed,
     uint VerificationLength,
-    uint TimeoutSeconds = 60)
+    uint TimeoutSeconds = 600)
 {
-    public VerifyCommand() : this(false, 0, 60)
+    public VerifyCommand() : this(false, 0, 600)
     {
     }
 

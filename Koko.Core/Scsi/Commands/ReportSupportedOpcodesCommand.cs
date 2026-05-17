@@ -6,9 +6,9 @@ public readonly record struct ReportSupportedOpcodesCommand(
     byte RequestedOpcode = 0,
     ushort RequestedServiceAction = 0,
     uint AllocationLength = 0,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReportSupportedOpcodesCommand() : this(0, false, 0, 0, 0, 10)
+    public ReportSupportedOpcodesCommand() : this(0, false, 0, 0, 0, 600)
     {
     }
 

@@ -180,7 +180,7 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase, ILtfsWriter
 
     public ValueTask<LtfsPartitionModeSense> ReadPartitionModeSenseAsync(CancellationToken cancellationToken = default) => FormatDevice.ReadPartitionModeSenseAsync(cancellationToken);
 
-    public bool GetInquiry(uint timeoutSeconds = 10)
+    public bool GetInquiry(uint timeoutSeconds = 600)
     {
         using (Log.PushMethod())
         {

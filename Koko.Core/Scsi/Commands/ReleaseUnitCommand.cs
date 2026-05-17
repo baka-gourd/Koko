@@ -4,9 +4,9 @@ public readonly record struct ReleaseUnitCommand(
     bool Use10Byte,
     bool ThirdParty = false,
     byte ThirdPartyDeviceId = 0,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReleaseUnitCommand() : this(false, false, 0, 10)
+    public ReleaseUnitCommand() : this(false, false, 0, 600)
     {
     }
 

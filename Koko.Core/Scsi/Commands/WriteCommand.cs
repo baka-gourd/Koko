@@ -4,9 +4,9 @@ public readonly record struct WriteCommand(
     bool Fixed,
     uint TransferLength,
     int? BlockSizeBytes = null,
-    uint TimeoutSeconds = 60)
+    uint TimeoutSeconds = 600)
 {
-    public WriteCommand() : this(false, 0, null, 60)
+    public WriteCommand() : this(false, 0, null, 600)
     {
     }
 

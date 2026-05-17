@@ -3,9 +3,9 @@ namespace Koko.Core.Scsi.Commands;
 public readonly record struct ReadCdRom6Command(
     uint LogicalBlockAddress,
     byte TransferLength,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReadCdRom6Command() : this(0, 0, 10)
+    public ReadCdRom6Command() : this(0, 0, 600)
     {
     }
 

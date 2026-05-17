@@ -3,9 +3,9 @@ namespace Koko.Core.Scsi.Commands;
 public readonly record struct ReportLunsCommand(
     byte SelectReport = 0,
     uint AllocationLength = 0,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReportLunsCommand() : this(0, 0, 10)
+    public ReportLunsCommand() : this(0, 0, 600)
     {
     }
 

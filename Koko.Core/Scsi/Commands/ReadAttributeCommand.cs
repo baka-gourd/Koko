@@ -7,9 +7,9 @@ public readonly record struct ReadAttributeCommand(
     ushort FirstAttributeId = 0,
     ushort AllocationLength = 0,
     bool Cache = false,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReadAttributeCommand() : this(0, 0, 0, 0, 0, false, 10)
+    public ReadAttributeCommand() : this(0, 0, 0, 0, 0, false, 600)
     {
     }
 

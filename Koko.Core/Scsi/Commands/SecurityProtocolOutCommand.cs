@@ -5,9 +5,9 @@ public readonly record struct SecurityProtocolOutCommand(
     ushort SecurityProtocolSpecific,
     ReadOnlyMemory<byte> ParameterData,
     bool IncrementBy512 = false,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public SecurityProtocolOutCommand() : this(0, 0, default, false, 10)
+    public SecurityProtocolOutCommand() : this(0, 0, default, false, 600)
     {
     }
 

@@ -3,9 +3,9 @@ namespace Koko.Core.Scsi.Commands;
 public readonly record struct EraseCommand(
     bool Immediate,
     bool LongErase,
-    uint TimeoutSeconds = 60)
+    uint TimeoutSeconds = 600)
 {
-    public EraseCommand() : this(false, false, 60)
+    public EraseCommand() : this(false, false, 600)
     {
     }
 

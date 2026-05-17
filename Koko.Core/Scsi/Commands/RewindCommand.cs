@@ -2,9 +2,9 @@ namespace Koko.Core.Scsi.Commands;
 
 public readonly record struct RewindCommand(
     bool Immediate,
-    uint TimeoutSeconds = 60)
+    uint TimeoutSeconds = 600)
 {
-    public RewindCommand() : this(false, 60)
+    public RewindCommand() : this(false, 600)
     {
     }
 

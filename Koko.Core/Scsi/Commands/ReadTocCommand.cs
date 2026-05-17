@@ -6,9 +6,9 @@ public readonly record struct ReadTocCommand(
     ushort AllocationLength,
     bool Msf = false,
     bool RelativeAddress = false,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReadTocCommand() : this(0, 0, 0, false, false, 10)
+    public ReadTocCommand() : this(0, 0, 0, false, false, 600)
     {
     }
 

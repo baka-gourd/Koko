@@ -4,9 +4,9 @@ public readonly record struct StartStopUnitCommand(
     bool Start,
     bool LoadEject,
     bool Immediate = false,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public StartStopUnitCommand() : this(false, false, false, 10)
+    public StartStopUnitCommand() : this(false, false, false, 600)
     {
     }
 

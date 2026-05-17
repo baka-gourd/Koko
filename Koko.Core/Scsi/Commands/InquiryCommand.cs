@@ -4,9 +4,9 @@ public readonly record struct InquiryCommand(
     bool EnableVitalProductData,
     byte PageCode = 0,
     ushort AllocationLength = 0,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public InquiryCommand() : this(false, 0, 0, 10)
+    public InquiryCommand() : this(false, 0, 0, 600)
     {
     }
 

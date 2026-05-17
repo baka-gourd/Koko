@@ -2,9 +2,9 @@ namespace Koko.Core.Scsi.Commands;
 
 public readonly record struct PreventAllowMediumRemovalCommand(
     bool Prevent,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public PreventAllowMediumRemovalCommand() : this(false, 10)
+    public PreventAllowMediumRemovalCommand() : this(false, 600)
     {
     }
 

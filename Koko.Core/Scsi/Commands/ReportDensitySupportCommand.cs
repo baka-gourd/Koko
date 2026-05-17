@@ -4,9 +4,9 @@ public readonly record struct ReportDensitySupportCommand(
     bool ReportMediumTypeDescriptors,
     bool ReportCurrentMedia,
     ushort AllocationLength,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReportDensitySupportCommand() : this(false, false, 0, 10)
+    public ReportDensitySupportCommand() : this(false, false, 0, 600)
     {
     }
 

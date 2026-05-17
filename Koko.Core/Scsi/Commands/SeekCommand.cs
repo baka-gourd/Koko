@@ -2,9 +2,9 @@ namespace Koko.Core.Scsi.Commands;
 
 public readonly record struct SeekCommand(
     uint LogicalBlockAddress,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public SeekCommand() : this(0, 10)
+    public SeekCommand() : this(0, 600)
     {
     }
 

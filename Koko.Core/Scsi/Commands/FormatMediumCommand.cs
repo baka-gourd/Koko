@@ -4,9 +4,9 @@ public readonly record struct FormatMediumCommand(
     bool Immediate,
     byte FormatCode,
     ushort TransferLength = 0,
-    uint TimeoutSeconds = 60)
+    uint TimeoutSeconds = 600)
 {
-    public FormatMediumCommand() : this(false, 0, 0, 60)
+    public FormatMediumCommand() : this(false, 0, 0, 600)
     {
     }
 

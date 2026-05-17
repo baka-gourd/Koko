@@ -15,9 +15,9 @@ public readonly record struct LocateCommand(
     uint BlockAddress,
     LocateDestinationType DestinationType,
     ulong LogicalIdentifier,
-    uint TimeoutSeconds = 60)
+    uint TimeoutSeconds = 600)
 {
-    public LocateCommand() : this(false, false, false, 0, 0, 0, 0, 60)
+    public LocateCommand() : this(false, false, false, 0, 0, 0, 0, 600)
     {
     }
 

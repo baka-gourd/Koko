@@ -4,9 +4,9 @@ public readonly record struct ReceiveDiagnosticResultsCommand(
     byte PageCode,
     bool PageCodeValid,
     ushort AllocationLength,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReceiveDiagnosticResultsCommand() : this(0, false, 0, 10)
+    public ReceiveDiagnosticResultsCommand() : this(0, false, 0, 600)
     {
     }
 

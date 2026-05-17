@@ -1,9 +1,9 @@
 namespace Koko.Core.Scsi.Commands;
 
 public readonly record struct ReadBlockLimitsCommand(
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReadBlockLimitsCommand() : this(10)
+    public ReadBlockLimitsCommand() : this(600)
     {
     }
 

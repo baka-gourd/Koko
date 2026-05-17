@@ -43,9 +43,9 @@ public readonly record struct LogSenseCommand(
     ushort AllocationLength = 0,
     bool SaveParameters = false,
     bool ParameterPointerControl = false,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public LogSenseCommand() : this(default, LogPageControl.CurrentCumulativeValues, 0, 0, false, false, 10)
+    public LogSenseCommand() : this(default, LogPageControl.CurrentCumulativeValues, 0, 0, false, false, 600)
     {
     }
 

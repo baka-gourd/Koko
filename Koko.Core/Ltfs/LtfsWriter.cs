@@ -184,13 +184,12 @@ public enum LtfsWriteCompletionKind
 
 public enum LtfsDirtyAppendPolicy
 {
-    Abort,
-    AllowWithWarning
+    WarnAndOverwriteFromStable
 }
 
 public sealed record LtfsAppendValidationOptions(
     bool Enabled = false,
-    LtfsDirtyAppendPolicy DirtyAppendPolicy = LtfsDirtyAppendPolicy.Abort);
+    LtfsDirtyAppendPolicy DirtyAppendPolicy = LtfsDirtyAppendPolicy.WarnAndOverwriteFromStable);
 
 public sealed record LtfsEomPolicyOptions(
     bool Enabled = true,
@@ -804,8 +803,8 @@ public sealed class LtfsWriterService
                 reserved = true;
                 removalPrevented = true;
 
-                await ValidateAppendBaselineAsync(operationId, index, request.Label, options, tapeExecutor, cancellationToken).ConfigureAwait(false);
-                await LocateToWritePositionAsync(operationId, index, options, tapeExecutor, cancellationToken).ConfigureAwait(false);
+                var overwriteDirtyTail = await ValidateAppendBaselineAsync(operationId, index, request.Label, options, tapeExecutor, cancellationToken).ConfigureAwait(false);
+                await LocateToWritePositionAsync(operationId, index, options, overwriteDirtyTail, tapeExecutor, cancellationToken).ConfigureAwait(false);
 
                 var writeState = await WritePlannedSourcesAsync(
                     operationId,
@@ -1098,22 +1097,39 @@ public sealed class LtfsWriterService
         }
     }
 
-    private async ValueTask LocateToWritePositionAsync(string operationId, LtfsIndex index, LtfsWriterOptions options, LtfsTapeCommandExecutor executor, CancellationToken cancellationToken)
+    private async ValueTask LocateToWritePositionAsync(
+        string operationId,
+        LtfsIndex index,
+        LtfsWriterOptions options,
+        bool overwriteDirtyTail,
+        LtfsTapeCommandExecutor executor,
+        CancellationToken cancellationToken)
     {
         Publish(operationId, LtfsWriterStepKind.LocateWritePosition, "Locate LTFS data partition write position.");
-        if (index.Location.Partition == LtfsPartition.A)
+        if (!overwriteDirtyTail)
         {
-            var restored = await ReadIndexAtAsync(operationId, index.PreviousGenerationLocation, options, executor, cancellationToken).ConfigureAwait(false);
-            index.Location = restored.Location.Clone();
-            index.PreviousGenerationLocation = restored.PreviousGenerationLocation.Clone();
+            if (index.Location.Partition == LtfsPartition.A)
+            {
+                var restored = await ReadIndexAtAsync(operationId, index.PreviousGenerationLocation, options, executor, cancellationToken).ConfigureAwait(false);
+                index.Location = restored.Location.Clone();
+                index.PreviousGenerationLocation = restored.PreviousGenerationLocation.Clone();
+                await LocateEndOfDataWithExecutorAsync(executor, LtfsPartition.B, options, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             await LocateEndOfDataWithExecutorAsync(executor, LtfsPartition.B, options, cancellationToken).ConfigureAwait(false);
             return;
         }
 
-        await LocateEndOfDataWithExecutorAsync(executor, LtfsPartition.B, options, cancellationToken).ConfigureAwait(false);
+        var stableLocation = GetStableDataIndexLocation(index);
+        var stableIndex = await ReadIndexAtAsync(operationId, stableLocation, options, executor, cancellationToken).ConfigureAwait(false);
+        index.Location = stableIndex.Location.Clone();
+        index.PreviousGenerationLocation = stableIndex.PreviousGenerationLocation.Clone();
+        var writePosition = await ReadPositionWithExecutorAsync(executor, options, cancellationToken).ConfigureAwait(false);
+        Publish(operationId, LtfsWriterStepKind.LocateWritePosition, $"Located LTFS write position at {writePosition.Partition}{writePosition.Block}; dirty tail data after the stable checkpoint will be overwritten.");
     }
 
-    private async ValueTask ValidateAppendBaselineAsync(
+    private async ValueTask<bool> ValidateAppendBaselineAsync(
         string operationId,
         LtfsIndex index,
         LtfsLabel? label,
@@ -1123,7 +1139,7 @@ public sealed class LtfsWriterService
     {
         var validation = options.AppendValidation ?? new LtfsAppendValidationOptions();
         if (!validation.Enabled && options.Discovery is null)
-            return;
+            return false;
 
         var result = LtfsIndexValidator.ValidateInternal(index, new LtfsIndexValidationOptions(options.BlockSizeBytes));
         if (!result.IsValid)
@@ -1145,20 +1161,26 @@ public sealed class LtfsWriterService
         {
             if (discovery.Index.VolumeUuid != Guid.Empty && index.VolumeUuid != Guid.Empty && discovery.Index.VolumeUuid != index.VolumeUuid)
                 throw new LtfsWriterException("LTFS discovery result belongs to a different volume.");
-            if (discovery.DirtyAppendDetected && validation.DirtyAppendPolicy == LtfsDirtyAppendPolicy.Abort)
-                throw new LtfsWriterException("LTFS discovery found unindexed data after the latest stable checkpoint.");
+            if (discovery.DirtyAppendDetected)
+                Publish(operationId, LtfsWriterStepKind.Warning, "LTFS discovery found unindexed data after the latest stable checkpoint; it will be overwritten from the stable checkpoint.", severity: KokoOperationSeverity.Warning);
         }
 
+        var dirtyTailDetected = discovery?.DirtyAppendDetected == true;
         var expected = discovery?.AppendPoint;
         if (expected is not null)
         {
             var actual = await LocateEndOfDataWithExecutorAsync(executor, LtfsPartition.B, options, cancellationToken).ConfigureAwait(false);
             if (actual.Partition != LtfsPartition.B || actual.Block < expected.Block)
                 throw new LtfsWriterException($"LTFS append point is before the latest stable checkpoint. Expected >= B{expected.Block}, actual {actual.Partition}{actual.Block}.");
-            if (actual.Block > expected.Block && validation.DirtyAppendPolicy == LtfsDirtyAppendPolicy.Abort)
-                throw new LtfsWriterException("LTFS append point contains unindexed data and dirty append is not allowed.");
+            if (actual.Block > expected.Block)
+            {
+                dirtyTailDetected = true;
+                Publish(operationId, LtfsWriterStepKind.Warning, $"LTFS append point contains unindexed data from B{expected.Block} to B{actual.Block}; it will be overwritten from the stable checkpoint.", severity: KokoOperationSeverity.Warning);
+            }
             Publish(operationId, LtfsWriterStepKind.LocateWritePosition, $"Validated LTFS append point at B{actual.Block}.");
         }
+
+        return dirtyTailDetected && !(discovery?.Worm ?? false) && index.VolumeLockState != LtfsVolumeLockState.PermLocked;
     }
 
     private async ValueTask<LtfsWritePlanState> WritePlannedSourcesAsync(
@@ -2700,6 +2722,16 @@ public sealed class LtfsWriterService
             && index.PreviousGenerationLocation.Partition == LtfsPartition.A
             ? LtfsPartition.A
             : LtfsPartition.B;
+    }
+
+    private static LtfsLocation GetStableDataIndexLocation(LtfsIndex index)
+    {
+        if (index.Location.Partition == LtfsPartition.B)
+            return index.Location.Clone();
+        if (index.PreviousGenerationLocation.Partition == LtfsPartition.B)
+            return index.PreviousGenerationLocation.Clone();
+
+        return index.Location.Clone();
     }
 
     private static LtfsDirectory? FindDirectory(LtfsDirectory directory, long fileUid)

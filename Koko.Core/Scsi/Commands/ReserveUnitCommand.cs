@@ -4,9 +4,9 @@ public readonly record struct ReserveUnitCommand(
     bool Use10Byte,
     bool ThirdParty = false,
     byte ThirdPartyDeviceId = 0,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReserveUnitCommand() : this(false, false, 0, 10)
+    public ReserveUnitCommand() : this(false, false, 0, 600)
     {
     }
 

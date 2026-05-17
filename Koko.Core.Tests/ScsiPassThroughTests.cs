@@ -167,6 +167,47 @@ public sealed class ScsiPassThroughTests
         await Assert.That(drive.ReadCallCount).IsEqualTo(2);
     }
 
+    [Test]
+    public async Task Read_command_uses_sense_residual_for_short_incorrect_length_blocks()
+    {
+        const int allocationLength = 0x80000;
+        const int actualLength = 471;
+        var payload = new byte[allocationLength];
+        payload[0] = (byte)'<';
+        payload[actualLength - 1] = (byte)'>';
+        var drive = new ScriptedScsiDrive(
+            new ScriptedScsiResult(true, 0x02, ShortIncorrectLengthSense(allocationLength - actualLength), payload, BytesReturned: 80));
+
+        var ok = ScsiCommandExecutor.TryExecuteRead(drive, [0x08, 0x00, 0x08, 0x00, 0x00, 0x00], allocationLength, 60, out var result, out var data);
+
+        await Assert.That(ok).IsTrue();
+        await Assert.That(result.ScsiStatus).IsEqualTo((byte)0x02);
+        await Assert.That(result.BytesReturned).IsEqualTo(80U);
+        await Assert.That(data.Length).IsEqualTo(actualLength);
+        await Assert.That(data[0]).IsEqualTo((byte)'<');
+        await Assert.That(data[^1]).IsEqualTo((byte)'>');
+    }
+
+    [Test]
+    public async Task Read_command_ignores_ioctl_bytes_returned_for_successful_direct_reads()
+    {
+        const int allocationLength = 0x80000;
+        var payload = new byte[allocationLength];
+        payload[0] = (byte)'<';
+        payload[255] = (byte)'>';
+        var drive = new ScriptedScsiDrive(
+            new ScriptedScsiResult(true, 0x00, new byte[IOControl.DefaultSenseLength], payload, BytesReturned: 56));
+
+        var ok = ScsiCommandExecutor.TryExecuteRead(drive, [0x08, 0x00, 0x08, 0x00, 0x00, 0x00], allocationLength, 60, out var result, out var data);
+
+        await Assert.That(ok).IsTrue();
+        await Assert.That(result.IsGood).IsTrue();
+        await Assert.That(result.BytesReturned).IsEqualTo(56U);
+        await Assert.That(data.Length).IsEqualTo(allocationLength);
+        await Assert.That(data[0]).IsEqualTo((byte)'<');
+        await Assert.That(data[255]).IsEqualTo((byte)'>');
+    }
+
     private static async Task AssertNoDataCommandDirection(
         Func<RecordingScsiDrive, bool> execute,
         byte[] expectedCdb)
@@ -186,6 +227,21 @@ public sealed class ScsiPassThroughTests
         ScsiCommandResult.From(true, 0x02, 0, Sense(senseKey, asc, ascq));
 
     private static byte[] PowerOnResetSense() => Sense(0x06, 0x29, 0x01);
+
+    private static byte[] ShortIncorrectLengthSense(int residual)
+    {
+        var sense = new byte[IOControl.DefaultSenseLength];
+        sense[0] = 0xF0;
+        sense[2] = 0x20;
+        sense[3] = (byte)(residual >> 24);
+        sense[4] = (byte)(residual >> 16);
+        sense[5] = (byte)(residual >> 8);
+        sense[6] = (byte)residual;
+        sense[7] = 0x10;
+        sense[16] = 0x2C;
+        sense[17] = 0x73;
+        return sense;
+    }
 
     private static byte[] Sense(byte senseKey, byte asc, byte ascq)
     {
@@ -320,7 +376,7 @@ public sealed class ScsiPassThroughTests
             senseBuffer.Clear();
             result.Sense.AsSpan(0, Math.Min(result.Sense.Length, senseBuffer.Length)).CopyTo(senseBuffer);
             scsiStatus = result.ScsiStatus;
-            bytesReturned = result.Data is null ? result.BytesReturned : (uint)result.Data.Length;
+            bytesReturned = result.BytesReturned != 0 || result.Data is null ? result.BytesReturned : (uint)result.Data.Length;
         }
     }
 

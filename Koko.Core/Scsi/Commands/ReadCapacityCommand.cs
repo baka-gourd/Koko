@@ -3,9 +3,9 @@ namespace Koko.Core.Scsi.Commands;
 public readonly record struct ReadCapacityCommand(
     uint LogicalBlockAddress = 0,
     bool PartialMediumIndicator = false,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReadCapacityCommand() : this(0, false, 10)
+    public ReadCapacityCommand() : this(0, false, 600)
     {
     }
 

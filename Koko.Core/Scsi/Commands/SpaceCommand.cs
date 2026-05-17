@@ -11,9 +11,9 @@ public readonly record struct SpaceCommand(
     bool Use16Byte,
     SpaceCode Code,
     long Count,
-    uint TimeoutSeconds = 60)
+    uint TimeoutSeconds = 600)
 {
-    public SpaceCommand() : this(false, default, 0, 60)
+    public SpaceCommand() : this(false, default, 0, 600)
     {
     }
 

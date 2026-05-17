@@ -4,9 +4,9 @@ public readonly record struct SendDiagnosticCommand(
     bool SelfTest,
     bool UnitOffline,
     ReadOnlyMemory<byte> ParameterData,
-    uint TimeoutSeconds = 60)
+    uint TimeoutSeconds = 600)
 {
-    public SendDiagnosticCommand() : this(false, false, default, 60)
+    public SendDiagnosticCommand() : this(false, false, default, 600)
     {
     }
 

@@ -31,10 +31,11 @@ internal static class ScsiCommandExecutor
                 out var bytesReturned,
                 senseBuffer: sense);
 
-            if (bytesReturned < (uint)data.Length)
-                Array.Resize(ref data, (int)bytesReturned);
-
             result = ScsiCommandResult.From(ok, scsiStatus, bytesReturned, sense, drive.LastTransportError);
+            var dataLength = GetReadDataLength(data.Length, bytesReturned, result.SenseData);
+            if (dataLength < data.Length)
+                Array.Resize(ref data, dataLength);
+
             if (!ShouldRetry(cdb, result, retryCount))
                 return ok;
 
@@ -139,6 +140,29 @@ internal static class ScsiCommandExecutor
             return segment.Array.AsSpan(segment.Offset, segment.Count);
 
         return data.ToArray().AsSpan();
+    }
+
+    private static int GetReadDataLength(int allocationLength, uint bytesReturned, ReadOnlySpan<byte> sense)
+    {
+        if (TryGetShortIncorrectLengthDataLength(allocationLength, sense, out var shortDataLength))
+            return shortDataLength;
+
+        _ = bytesReturned;
+        return allocationLength;
+    }
+
+    private static bool TryGetShortIncorrectLengthDataLength(int allocationLength, ReadOnlySpan<byte> sense, out int dataLength)
+    {
+        dataLength = 0;
+        if (sense.Length < 7 || (sense[2] & 0x20) == 0)
+            return false;
+
+        var residual = (sense[3] << 24) | (sense[4] << 16) | (sense[5] << 8) | sense[6];
+        if (residual < 0 || residual > allocationLength)
+            return false;
+
+        dataLength = allocationLength - residual;
+        return true;
     }
 
     private static bool ShouldRetry(ReadOnlySpan<byte> cdb, ScsiCommandResult result, int retryCount)

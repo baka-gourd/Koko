@@ -4,9 +4,9 @@ public readonly record struct WriteAttributeCommand(
     byte VolumeNumber,
     byte PartitionNumber,
     ReadOnlyMemory<byte> ParameterList,
-    uint TimeoutSeconds = 30)
+    uint TimeoutSeconds = 600)
 {
-    public WriteAttributeCommand() : this(0, 0, default, 30)
+    public WriteAttributeCommand() : this(0, 0, default, 600)
     {
     }
 

@@ -4,9 +4,9 @@ public readonly record struct WriteFilemarksCommand(
     bool Immediate,
     uint FilemarkCount,
     bool WriteSetMarks = false,
-    uint TimeoutSeconds = 60)
+    uint TimeoutSeconds = 600)
 {
-    public WriteFilemarksCommand() : this(false, 0, false, 60)
+    public WriteFilemarksCommand() : this(false, 0, false, 600)
     {
     }
 

@@ -6,9 +6,9 @@ public readonly record struct ModeSelectCommand(
     bool SavePages,
     ReadOnlyMemory<byte> ParameterList,
     ushort ParameterListLength = 0,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ModeSelectCommand() : this(false, false, false, default, 0, 10)
+    public ModeSelectCommand() : this(false, false, false, default, 0, 600)
     {
     }
 

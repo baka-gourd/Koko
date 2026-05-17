@@ -10,9 +10,9 @@ public enum ReadPositionServiceAction : byte
 public readonly record struct ReadPositionCommand(
     ReadPositionServiceAction ServiceAction,
     ushort AllocationLength = 0,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReadPositionCommand() : this(default, 0, 10)
+    public ReadPositionCommand() : this(default, 0, 600)
     {
     }
 

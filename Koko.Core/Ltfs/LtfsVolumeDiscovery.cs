@@ -21,9 +21,17 @@ public enum LtfsIndexDiscoverySource
     FallbackScan
 }
 
+public enum LtfsDiscoveryIndexPreference
+{
+    IndexPartition,
+    LatestStable
+}
+
 public sealed record LtfsVolumeDiscoveryOptions(
     Guid? ExpectedVolumeUuid = null,
-    bool AllowForeignVolume = false);
+    bool AllowForeignVolume = false,
+    LtfsDiscoveryIndexPreference IndexPreference = LtfsDiscoveryIndexPreference.IndexPartition,
+    bool IndexPartitionOnly = false);
 
 public sealed record LtfsDiscoveredLabel(
     LtfsPartition Partition,
@@ -193,24 +201,50 @@ public sealed class LtfsVolumeDiscoveryService
         var executor = new LtfsTapeCommandExecutor();
         var effectiveWriterOptions = LtfsWriterService.ResolvePublicOptions(writerOptions);
         LtfsLabel label;
+        LtfsResolvedLayout layout;
         bool? detectedWorm;
 
         using (ScsiStartupUnitAttentionRetry.SuppressPowerOnReset(scopeName: "LTFS discovery startup"))
         {
             await ApplyEncryptionAsync(operationId, effectiveWriterOptions, cancellationToken).ConfigureAwait(false);
             detectedWorm = await DetectWormAsync(cancellationToken).ConfigureAwait(false);
-            var vol1 = await ReadBlockAtAsync(executor, LtfsPartition.A, 0, 80, effectiveWriterOptions.TapeControl, cancellationToken).ConfigureAwait(false);
+            var vol1 = await ReadBlockAtAsync(executor, LtfsPartition.A, 0, LegacyProbeReadLimitBytes, effectiveWriterOptions.TapeControl, cancellationToken).ConfigureAwait(false);
             ValidateVol1(vol1);
             label = await ReadLabelAtFilemarkAsync(executor, LtfsPartition.A, 1, LegacyProbeReadLimitBytes, effectiveWriterOptions.TapeControl, cancellationToken).ConfigureAwait(false);
             effectiveWriterOptions = effectiveWriterOptions with { BlockSizeBytes = label.BlockSize };
             await device.SetBlockSizeAsync(label.BlockSize, cancellationToken).ConfigureAwait(false);
+            layout = await ResolveLabelLayoutAsync(executor, label, effectiveWriterOptions, cancellationToken).ConfigureAwait(false);
+            label = layout.Label;
         }
 
-        var vciResult = await TryDiscoverFromVciAsync(options, effectiveWriterOptions, warnings, detectedWorm, executor, label, cancellationToken).ConfigureAwait(false);
+        var vciResult = await TryDiscoverFromVciAsync(options, effectiveWriterOptions, warnings, detectedWorm, executor, layout, cancellationToken).ConfigureAwait(false);
         if (vciResult is not null)
             return vciResult;
 
-        return await DiscoverLegacyAsync(options, effectiveWriterOptions, warnings, detectedWorm, executor, label, cancellationToken).ConfigureAwait(false);
+        return await DiscoverLegacyAsync(options, effectiveWriterOptions, warnings, detectedWorm, executor, layout, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask<LtfsResolvedLayout> ResolveLabelLayoutAsync(
+        LtfsTapeCommandExecutor executor,
+        LtfsLabel label,
+        LtfsWriterOptions writerOptions,
+        CancellationToken cancellationToken)
+    {
+        var indexPartition = LtfsPartition.A;
+        var dataPartition = LtfsPartition.B;
+        if (label.LocationPartition == label.DataPartition && label.IndexPartition != label.DataPartition)
+        {
+            dataPartition = LtfsPartition.A;
+            indexPartition = LtfsPartition.B;
+            label = await ReadLabelAtFilemarkAsync(executor, indexPartition, 1, writerOptions.BlockSizeBytes, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
+        }
+        else if (label.IndexPartition == label.DataPartition)
+        {
+            indexPartition = LtfsPartition.A;
+            dataPartition = LtfsPartition.A;
+        }
+
+        return new LtfsResolvedLayout(label, indexPartition, dataPartition);
     }
 
     private async ValueTask<LtfsVolumeDiscoveryResult?> TryDiscoverFromVciAsync(
@@ -219,7 +253,7 @@ public sealed class LtfsVolumeDiscoveryService
         List<string> warnings,
         bool? detectedWorm,
         LtfsTapeCommandExecutor executor,
-        LtfsLabel label,
+        LtfsResolvedLayout layout,
         CancellationToken cancellationToken)
     {
         if (device is not ILtfsPartitionMamDevice mamDevice)
@@ -251,11 +285,46 @@ public sealed class LtfsVolumeDiscoveryService
         if (options.ExpectedVolumeUuid is { } expected && !options.AllowForeignVolume && candidates.All(x => x.Vci.VolumeUuid != expected))
             throw new LtfsWriterException("LTFS VCI discovery found a foreign volume.");
 
-        if (candidates.Select(x => x.Vci.Generation).Distinct().Skip(1).Any())
-            warnings.Add("VCI MAM attributes report different generations; trying the highest generation first.");
+        var forceIndexPartition = options.IndexPartitionOnly || options.IndexPreference == LtfsDiscoveryIndexPreference.IndexPartition;
+        if (options.IndexPartitionOnly && options.IndexPreference == LtfsDiscoveryIndexPreference.LatestStable)
+            warnings.Add("Index-partition-only discovery ignores latest-stable data partition VCI candidates.");
 
-        foreach (var candidate in candidates
-                     .Where(x => options.ExpectedVolumeUuid is null || options.AllowForeignVolume || x.Vci.VolumeUuid == options.ExpectedVolumeUuid.Value)
+        if (candidates.Select(x => x.Vci.Generation).Distinct().Skip(1).Any())
+        {
+            var action = forceIndexPartition
+                ? $"using partition {layout.IndexPartition} per index-partition preference."
+                : "trying the highest generation first.";
+            warnings.Add($"VCI MAM attributes report different generations; {action}");
+        }
+
+        var matchingCandidates = candidates
+            .Where(x => options.ExpectedVolumeUuid is null || options.AllowForeignVolume || x.Vci.VolumeUuid == options.ExpectedVolumeUuid.Value)
+            .ToArray();
+
+        if (forceIndexPartition)
+        {
+            var indexPartitionCandidates = matchingCandidates
+                .Where(x => x.Partition == layout.IndexPartition)
+                .ToArray();
+            var ignoredHigherGeneration = matchingCandidates
+                .Where(x => x.Partition != layout.IndexPartition)
+                .OrderByDescending(x => x.Vci.Generation)
+                .FirstOrDefault();
+            var highestIndexGeneration = indexPartitionCandidates.Select(x => (ulong?)x.Vci.Generation).Max();
+            if (highestIndexGeneration is null)
+            {
+                if (ignoredHigherGeneration.Vci is not null)
+                    warnings.Add($"VCI on non-index partition {ignoredHigherGeneration.Partition} generation {ignoredHigherGeneration.Vci.Generation} was ignored; falling back to index partition layout.");
+            }
+            else if (ignoredHigherGeneration.Vci is not null && ignoredHigherGeneration.Vci.Generation > highestIndexGeneration.Value)
+            {
+                warnings.Add($"VCI on non-index partition {ignoredHigherGeneration.Partition} generation {ignoredHigherGeneration.Vci.Generation} is newer than index partition generation {highestIndexGeneration.Value}; using index partition schema.");
+            }
+
+            matchingCandidates = indexPartitionCandidates;
+        }
+
+        foreach (var candidate in matchingCandidates
                      .OrderByDescending(x => x.Vci.Generation)
                      .ThenBy(x => x.Partition == LtfsPartition.A ? 0 : 1))
         {
@@ -270,17 +339,31 @@ public sealed class LtfsVolumeDiscoveryService
                 if (!MatchesExpected(index, options))
                     throw new LtfsWriterException("LTFS VCI discovery found a foreign volume.");
 
-                var dataPartition = InferDataPartition(index, candidate.Partition);
+                var dataPartition = layout.DataPartition;
+                if (ShouldSkipDataPartitionProbe(options, layout))
+                {
+                    warnings.Add("Index-partition-only discovery did not probe data partition EOD; dirty append state is unknown.");
+                    return new LtfsVolumeDiscoveryResult(
+                        index,
+                        layout.Label,
+                        GetStableDataPosition(index, dataPartition),
+                        LtfsIndexDiscoverySource.VciIndexPartition,
+                        DirtyAppendDetected: false,
+                        IsWorm(index, detectedWorm),
+                        WriteProtected: false,
+                        warnings);
+                }
+
                 var append = await LocateEndOfDataAsync(executor, dataPartition, writerOptions, cancellationToken).ConfigureAwait(false);
                 var stableDataBlock = index.Location.Partition == dataPartition ? index.Location.StartBlock : index.PreviousGenerationLocation.StartBlock;
                 var dirty = append.Block > stableDataBlock;
                 if (dirty)
                     warnings.Add("Data partition EOD is after the VCI-discovered checkpoint; unindexed data may exist.");
 
-                var source = candidate.Partition == LtfsPartition.A
+                var source = candidate.Partition == layout.IndexPartition
                     ? LtfsIndexDiscoverySource.VciIndexPartition
                     : LtfsIndexDiscoverySource.VciDataPartition;
-                return new LtfsVolumeDiscoveryResult(index, label, append, source, dirty, IsWorm(index, detectedWorm), false, warnings);
+                return new LtfsVolumeDiscoveryResult(index, layout.Label, append, source, dirty, IsWorm(index, detectedWorm), false, warnings);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -297,22 +380,12 @@ public sealed class LtfsVolumeDiscoveryService
         List<string> warnings,
         bool? detectedWorm,
         LtfsTapeCommandExecutor executor,
-        LtfsLabel label,
+        LtfsResolvedLayout layout,
         CancellationToken cancellationToken)
     {
-        var indexPartition = LtfsPartition.A;
-        var dataPartition = LtfsPartition.B;
-        if (label.LocationPartition == label.DataPartition && label.IndexPartition != label.DataPartition)
-        {
-            dataPartition = LtfsPartition.A;
-            indexPartition = LtfsPartition.B;
-            label = await ReadLabelAtFilemarkAsync(executor, indexPartition, 1, writerOptions.BlockSizeBytes, writerOptions.TapeControl, cancellationToken).ConfigureAwait(false);
-        }
-        else if (label.IndexPartition == label.DataPartition)
-        {
-            indexPartition = LtfsPartition.A;
-            dataPartition = LtfsPartition.A;
-        }
+        var indexPartition = layout.IndexPartition;
+        var dataPartition = layout.DataPartition;
+        var label = layout.Label;
 
         if (indexPartition == dataPartition)
             return await DiscoverLegacySinglePartitionAsync(options, writerOptions, warnings, detectedWorm, executor, label, dataPartition, cancellationToken).ConfigureAwait(false);
@@ -328,6 +401,20 @@ public sealed class LtfsVolumeDiscoveryService
             cancellationToken).ConfigureAwait(false);
         if (!MatchesExpected(index, options))
             throw new LtfsWriterException("LTFS legacy discovery found a foreign volume.");
+
+        if (ShouldSkipDataPartitionProbe(options, layout))
+        {
+            warnings.Add("Index-partition-only discovery did not probe data partition EOD; dirty append state is unknown.");
+            return new LtfsVolumeDiscoveryResult(
+                index,
+                label,
+                GetStableDataPosition(index, dataPartition),
+                LtfsIndexDiscoverySource.LabelLayout,
+                DirtyAppendDetected: false,
+                IsWorm(index, detectedWorm),
+                WriteProtected: false,
+                warnings);
+        }
 
         var append = await LocateEndOfDataAsync(executor, dataPartition, writerOptions, cancellationToken).ConfigureAwait(false);
         var stableDataBlock = index.Location.Partition == dataPartition ? index.Location.StartBlock : index.PreviousGenerationLocation.StartBlock;
@@ -539,53 +626,46 @@ public sealed class LtfsVolumeDiscoveryService
 
         try
         {
-            _ = await LocateFilemarkAsync(executor, partition, filemark, tapeControl, cancellationToken).ConfigureAwait(false);
-            var payloadStart = await AdvancePastFilemarkAsync(executor, tapeControl, cancellationToken).ConfigureAwait(false);
+            var filemarkPosition = await LocateFilemarkAsync(executor, partition, filemark, tapeControl, cancellationToken).ConfigureAwait(false);
+            var payloadStart = await LocateBlockAsync(executor, partition, checked(filemarkPosition.Block + 1), tapeControl, cancellationToken).ConfigureAwait(false);
             var payload = await ReadToFilemarkAtCurrentPositionAsync(executor, payloadStart, readLimitBytes, tapeControl, cancellationToken).ConfigureAwait(false);
             return readPayload(payload);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             throw new LtfsWriterException(
-                $"LTFS discovery could not read {payloadKind} after filemark {partition}{filemark}. Direct read failed: {directFailure?.Message}; filemark-advance read failed: {ex.Message}",
+                $"LTFS discovery could not read {payloadKind} after filemark {partition}{filemark}. Direct read failed: {directFailure?.Message}; block-after-filemark read failed: {ex.Message}",
                 ex);
         }
     }
 
-    private async ValueTask<LtfsTapePosition> AdvancePastFilemarkAsync(
+    private async ValueTask<LtfsTapePosition> LocateBlockAsync(
         LtfsTapeCommandExecutor executor,
+        LtfsPartition partition,
+        ulong block,
         LtfsTapeSessionControl? tapeControl,
         CancellationToken cancellationToken)
     {
-        LtfsTapePosition? position = null;
+        var position = new LtfsTapePosition(partition, block);
         var queue = new LtfsTapeCommandQueue();
         queue.Enqueue(new LtfsTapeCommand(
-            LtfsTapeCommandKind.ReadDataBlock,
-            ct => device.AdvancePastFilemarkAsync(ct),
-            LtfsTapeCommandPriority.Data,
-            LtfsTapeBarrierKind.HardBarrier,
-            ReadPositionAsync: ct => device.ReadPositionAsync(ct)));
-        queue.Enqueue(new LtfsTapeCommand(
-            LtfsTapeCommandKind.ReadPosition,
-            async ct => position = await device.ReadPositionAsync(ct).ConfigureAwait(false),
+            LtfsTapeCommandKind.LocateBlock,
+            ct => device.LocateAsync(partition, block, ct),
             LtfsTapeCommandPriority.Control,
             LtfsTapeBarrierKind.HardBarrier,
-            AffectsPosition: false,
+            ExpectedEndPosition: position,
             ReadPositionAsync: ct => device.ReadPositionAsync(ct)));
         await executor.ExecuteAsync(queue, tapeControl, cancellationToken).ConfigureAwait(false);
-        if (position is null)
-            throw new LtfsWriterException("LTFS discovery filemark advance did not return a position.");
         executor.SetExpectedPosition(position);
         return position;
     }
 
     private static void ValidateVol1(ReadOnlySpan<byte> data)
     {
-        if (data.Length != 80)
-            throw new LtfsWriterException("LTFS legacy discovery did not find a valid 80-byte VOL1 label.");
+        if (data.Length < 28)
+            throw new LtfsWriterException("LTFS legacy discovery did not find a complete VOL1 label.");
 
-        var text = System.Text.Encoding.ASCII.GetString(data);
-        if (!text.StartsWith("VOL1", StringComparison.Ordinal) || text.Length < 28 || !string.Equals(text.Substring(24, 4), "LTFS", StringComparison.Ordinal))
+        if (!data[..4].SequenceEqual("VOL1"u8) || !data.Slice(24, 4).SequenceEqual("LTFS"u8))
             throw new LtfsWriterException("LTFS legacy discovery did not find a valid LTFS VOL1 label.");
     }
 
@@ -780,12 +860,18 @@ public sealed class LtfsVolumeDiscoveryService
         return detectedWorm == true || index.VolumeLockState == LtfsVolumeLockState.PermLocked;
     }
 
-    private static LtfsPartition InferDataPartition(LtfsIndex index, LtfsPartition vciPartition)
+    private static bool ShouldSkipDataPartitionProbe(LtfsVolumeDiscoveryOptions options, LtfsResolvedLayout layout)
     {
-        if (index.Location.Partition == LtfsPartition.B || index.PreviousGenerationLocation.Partition == LtfsPartition.B)
-            return LtfsPartition.B;
-
-        return vciPartition == LtfsPartition.B ? LtfsPartition.B : LtfsPartition.A;
+        return options.IndexPartitionOnly && layout.IndexPartition != layout.DataPartition;
     }
 
+    private static LtfsTapePosition GetStableDataPosition(LtfsIndex index, LtfsPartition dataPartition)
+    {
+        var block = index.Location.Partition == dataPartition
+            ? index.Location.StartBlock
+            : index.PreviousGenerationLocation.StartBlock;
+        return new LtfsTapePosition(dataPartition, block);
+    }
+
+    private sealed record LtfsResolvedLayout(LtfsLabel Label, LtfsPartition IndexPartition, LtfsPartition DataPartition);
 }

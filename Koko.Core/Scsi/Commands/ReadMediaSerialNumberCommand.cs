@@ -2,9 +2,9 @@ namespace Koko.Core.Scsi.Commands;
 
 public readonly record struct ReadMediaSerialNumberCommand(
     ushort AllocationLength,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReadMediaSerialNumberCommand() : this(0, 10)
+    public ReadMediaSerialNumberCommand() : this(0, 600)
     {
     }
 

@@ -2,9 +2,9 @@ namespace Koko.Core.Scsi.Commands;
 
 public readonly record struct ReportDeviceIdentifierCommand(
     uint AllocationLength,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReportDeviceIdentifierCommand() : this(0, 10)
+    public ReportDeviceIdentifierCommand() : this(0, 600)
     {
     }
 

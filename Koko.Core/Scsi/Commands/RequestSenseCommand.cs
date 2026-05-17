@@ -3,9 +3,9 @@ namespace Koko.Core.Scsi.Commands;
 public readonly record struct RequestSenseCommand(
     bool DescriptorFormat,
     byte AllocationLength = 0x12,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public RequestSenseCommand() : this(false, 0x12, 10)
+    public RequestSenseCommand() : this(false, 0x12, 600)
     {
     }
 

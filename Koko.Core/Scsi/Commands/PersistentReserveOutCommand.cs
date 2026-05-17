@@ -5,9 +5,9 @@ public readonly record struct PersistentReserveOutCommand(
     byte Scope,
     byte Type,
     ReadOnlyMemory<byte> ParameterData,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public PersistentReserveOutCommand() : this(0, 0, 0, default, 10)
+    public PersistentReserveOutCommand() : this(0, 0, 0, default, 600)
     {
     }
 

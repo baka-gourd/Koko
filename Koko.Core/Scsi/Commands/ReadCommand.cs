@@ -5,9 +5,9 @@ public readonly record struct ReadCommand(
     bool Fixed,
     uint TransferLength,
     int? BlockSizeBytes = null,
-    uint TimeoutSeconds = 60)
+    uint TimeoutSeconds = 600)
 {
-    public ReadCommand() : this(false, false, 0, null, 60)
+    public ReadCommand() : this(false, false, 0, null, 600)
     {
     }
 

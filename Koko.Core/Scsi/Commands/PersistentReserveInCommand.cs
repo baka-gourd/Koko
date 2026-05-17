@@ -3,9 +3,9 @@ namespace Koko.Core.Scsi.Commands;
 public readonly record struct PersistentReserveInCommand(
     byte ServiceAction,
     ushort AllocationLength,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public PersistentReserveInCommand() : this(0, 0, 10)
+    public PersistentReserveInCommand() : this(0, 0, 600)
     {
     }
 

@@ -5,9 +5,9 @@ public readonly record struct LogSelectCommand(
     bool ParameterCodeReset,
     ReadOnlyMemory<byte> ParameterData,
     bool SaveParameters = false,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public LogSelectCommand() : this(default, false, default, false, 10)
+    public LogSelectCommand() : this(default, false, default, false, 600)
     {
     }
 

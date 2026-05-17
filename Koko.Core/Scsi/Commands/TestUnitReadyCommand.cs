@@ -1,9 +1,9 @@
 namespace Koko.Core.Scsi.Commands;
 
 public readonly record struct TestUnitReadyCommand(
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public TestUnitReadyCommand() : this(10)
+    public TestUnitReadyCommand() : this(600)
     {
     }
 

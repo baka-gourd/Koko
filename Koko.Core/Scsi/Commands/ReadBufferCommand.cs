@@ -5,9 +5,9 @@ public readonly record struct ReadBufferCommand(
     byte BufferId = 0,
     uint BufferOffset = 0,
     uint AllocationLength = 0,
-    uint TimeoutSeconds = 10)
+    uint TimeoutSeconds = 600)
 {
-    public ReadBufferCommand() : this(0, 0, 0, 0, 10)
+    public ReadBufferCommand() : this(0, 0, 0, 0, 600)
     {
     }
 

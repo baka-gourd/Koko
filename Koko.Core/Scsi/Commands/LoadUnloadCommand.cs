@@ -5,9 +5,9 @@ public readonly record struct LoadUnloadCommand(
     bool Hold,
     bool Retension,
     bool Load,
-    uint TimeoutSeconds = 60)
+    uint TimeoutSeconds = 600)
 {
-    public LoadUnloadCommand() : this(false, false, false, false, 60)
+    public LoadUnloadCommand() : this(false, false, false, false, 600)
     {
     }
 
