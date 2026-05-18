@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Koko.DebugUI": {
+      "commandName": "Project",
+      "remoteDebugEnabled": false,
+      "remoteDebugMachine": "NPTR-TAPE",
+      "authenticationMode": "Windows"
+    }
+  }
+}

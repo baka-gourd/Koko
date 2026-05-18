@@ -1,5 +1,8 @@
 using System.Diagnostics;
+using System.Formats.Tar;
 using System.IO;
+using System.IO.Compression;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 
@@ -8,6 +11,7 @@ using Koko.Core.Helpers;
 using Koko.Core.Ltfs;
 using Koko.Core.Scsi;
 using Koko.Core.Scsi.Commands;
+using Koko.Core.Scsi.Parsers;
 
 using Microsoft.Win32;
 
@@ -101,6 +105,7 @@ public partial class MainWindow : Window
             CommandDetailsGrid.ItemsSource = null;
             var result = await Task.Run(() => ReadIndexPartitionSchema(devicePath));
             CommandDetailsGrid.ItemsSource = result.CommandTraces;
+            AppendCommandDataLog(result.CommandTraces);
             DisplayIndex(result.Index, $"{devicePath} ({result.Source})");
             AppendLog($"Discovered LTFS schema from {devicePath}. Source={result.Source}, append={result.AppendPoint.Partition}{result.AppendPoint.Block}, dirty={result.DirtyAppendDetected}, blocksize={result.Label?.BlockSize ?? 0}.");
             foreach (var warning in result.Warnings)
@@ -111,6 +116,7 @@ public partial class MainWindow : Window
             if (ex is DebugReadException debugReadException)
             {
                 CommandDetailsGrid.ItemsSource = debugReadException.CommandTraces;
+                AppendCommandDataLog(debugReadException.CommandTraces);
                 ShowError("Failed to read index partition schema.", debugReadException.InnerException ?? debugReadException);
             }
             else
@@ -129,13 +135,66 @@ public partial class MainWindow : Window
         ShowTestUnitReadyPacket();
     }
 
+    private async void ExportLtfsTarZst_Click(object sender, RoutedEventArgs e)
+    {
+        var devicePath = Manual.Text?.Trim();
+        if (string.IsNullOrWhiteSpace(devicePath))
+        {
+            MessageBox.Show(this, "Enter a SCSI tape drive path first.", "Koko Debug UI", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var dialog = new SaveFileDialog
+        {
+            Title = "Export LTFS tar.zst",
+            Filter = "Koko LTFS archive (*.tar.zst)|*.tar.zst|All files (*.*)|*.*",
+            AddExtension = true,
+            DefaultExt = ".tar.zst",
+            FileName = $"LTFSIndex_DebugExport_{DateTimeOffset.UtcNow:yyyyMMdd_HHmmss}Z.tar.zst",
+            OverwritePrompt = true,
+        };
+
+        if (dialog.ShowDialog(this) != true)
+            return;
+
+        try
+        {
+            SetBusy($"Exporting LTFS tar.zst from {devicePath}");
+            CommandDetailsGrid.ItemsSource = null;
+            var result = await Task.Run(() => ExportLtfsTarZst(devicePath, dialog.FileName));
+            CommandDetailsGrid.ItemsSource = result.CommandTraces;
+            AppendCommandDataLog(result.CommandTraces);
+            DisplayIndex(result.Index, $"{devicePath} ({result.Source})");
+            AppendLog($"Exported {result.ArchivePath}.");
+            AppendLog($"Validated archive entries={result.Validation.EntryCount}, schema={result.Validation.SchemaCount}, label={result.Validation.LabelCount}, mam={result.Validation.MamCount}, cm={result.Validation.CmCount}.");
+            foreach (var warning in result.Warnings)
+                AppendLog($"WARN: {warning}");
+        }
+        catch (Exception ex)
+        {
+            if (ex is DebugReadException debugReadException)
+            {
+                CommandDetailsGrid.ItemsSource = debugReadException.CommandTraces;
+                AppendCommandDataLog(debugReadException.CommandTraces);
+                ShowError("Failed to export LTFS tar.zst.", debugReadException.InnerException ?? debugReadException);
+            }
+            else
+            {
+                ShowError("Failed to export LTFS tar.zst.", ex);
+            }
+        }
+        finally
+        {
+            SetReady();
+        }
+    }
+
     private static async Task<DebugReadResult> ReadIndexPartitionSchema(string devicePath)
     {
-        //var manager = DriveSessionManager.Instance.Value;
-        //using var lease = manager.Lease(devicePath, LtoTapeDrive.OpenDriveByPath);
-        //if (lease.Drive is not LtoTapeDrive lto)
-        //    throw new InvalidOperationException("Device is not an LTO tape drive.");
-        var dev = LtoTapeDrive.OpenDriveByPath(devicePath);
+        var manager = DriveSessionManager.Instance.Value;
+        using var lease = manager.Lease(devicePath, LtoTapeDrive.OpenDriveByPath);
+        if (lease.Drive is not LtoTapeDrive dev)
+            throw new InvalidOperationException("Device is not an LTO tape drive.");
 
         var traceDrive = new TraceScsiDrive(dev);
         var device = new ScsiLtfsWriterDevice(traceDrive);
@@ -149,7 +208,10 @@ public partial class MainWindow : Window
             {
                 await device.PreventRemovalAsync(true);
                 removalPrevented = true;
-                var result = await new LtfsVolumeDiscoveryService(device).DiscoverAsync();
+                var result = await new LtfsVolumeDiscoveryService(device).DiscoverAsync(
+                    new LtfsVolumeDiscoveryOptions(
+                        IndexPreference: LtfsDiscoveryIndexPreference.IndexPartition,
+                        IndexPartitionOnly: true));
                 return new DebugReadResult(result, traceDrive.Traces);
             }
             finally
@@ -163,6 +225,111 @@ public partial class MainWindow : Window
         {
             throw new DebugReadException(ex, traceDrive.Traces);
         }
+    }
+
+    private static async Task<DebugExportResult> ExportLtfsTarZst(string devicePath, string archivePath)
+    {
+        var manager = DriveSessionManager.Instance.Value;
+        using var lease = manager.Lease(devicePath, LtoTapeDrive.OpenDriveByPath);
+        if (lease.Drive is not LtoTapeDrive dev)
+            throw new InvalidOperationException("Device is not an LTO tape drive.");
+
+        var traceDrive = new TraceScsiDrive(dev);
+        var device = new ScsiLtfsWriterDevice(traceDrive);
+
+        try
+        {
+            await device.TestUnitReadyAsync();
+            await device.ReserveAsync();
+            var removalPrevented = false;
+            try
+            {
+                await device.PreventRemovalAsync(true);
+                removalPrevented = true;
+                var discovery = await new LtfsVolumeDiscoveryService(device).DiscoverAsync(
+                    new LtfsVolumeDiscoveryOptions(
+                        IndexPreference: LtfsDiscoveryIndexPreference.IndexPartition,
+                        IndexPartitionOnly: true));
+
+                var artifacts = await new LtfsAutosaveExporter().ExportAsync(
+                    new LtfsAutosaveRequest(
+                        OperationId: "debug-ui-export",
+                        Reason: "manual-debug-export",
+                        Index: discovery.Index,
+                        Label: discovery.Label,
+                        Options: new LtfsAutosaveOptions(
+                            Enabled: true,
+                            OutputArchivePath: archivePath,
+                            RetainLastPerVolume: 0),
+                        MetadataDevice: device),
+                    CancellationToken.None);
+
+                var exportedPath = artifacts.Single();
+                var validation = ValidateArchive(exportedPath);
+                return new DebugExportResult(discovery, traceDrive.Traces, exportedPath, validation);
+            }
+            finally
+            {
+                if (removalPrevented)
+                    await device.PreventRemovalAsync(false);
+                await device.ReleaseAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            throw new DebugReadException(ex, traceDrive.Traces);
+        }
+    }
+
+    private static ArchiveValidationResult ValidateArchive(string archivePath)
+    {
+        var entryCount = 0;
+        var schemaCount = 0;
+        var labelCount = 0;
+        var mamCount = 0;
+        var cmCount = 0;
+
+        using var archiveStream = File.OpenRead(archivePath);
+        using var zstandardStream = new ZstandardStream(archiveStream, CompressionMode.Decompress, leaveOpen: false);
+        using var tarReader = new TarReader(zstandardStream, leaveOpen: false);
+        while (tarReader.GetNextEntry() is { } entry)
+        {
+            if (entry.DataStream is null)
+                continue;
+
+            entryCount++;
+            using var data = new MemoryStream();
+            entry.DataStream.CopyTo(data);
+            data.Position = 0;
+
+            if (entry.Name.EndsWith(".schema", StringComparison.OrdinalIgnoreCase))
+            {
+                LtfsSchemaReader.Read(data);
+                schemaCount++;
+            }
+            else if (entry.Name.EndsWith(".label", StringComparison.OrdinalIgnoreCase))
+            {
+                LtfsLabelReader.Read(data);
+                labelCount++;
+            }
+            else if (entry.Name.EndsWith(".mam.json", StringComparison.OrdinalIgnoreCase))
+            {
+                using var _ = JsonDocument.Parse(data);
+                mamCount++;
+            }
+            else if (entry.Name.EndsWith(".cm.bin", StringComparison.OrdinalIgnoreCase))
+            {
+                CMParser.CreateFromSpan(data.ToArray());
+                cmCount++;
+            }
+        }
+
+        if (entryCount == 0)
+            throw new InvalidDataException("The exported archive does not contain any readable tar entries.");
+        if (schemaCount == 0)
+            throw new InvalidDataException("The exported archive does not contain an LTFS schema entry.");
+
+        return new ArchiveValidationResult(entryCount, schemaCount, labelCount, mamCount, cmCount);
     }
 
     private void ShowTestUnitReadyPacket()
@@ -275,6 +442,12 @@ public partial class MainWindow : Window
         LogTextBox.ScrollToEnd();
     }
 
+    private void AppendCommandDataLog(IReadOnlyList<ScsiCommandTraceRow> commandTraces)
+    {
+        foreach (var row in commandTraces.Where(x => !string.IsNullOrWhiteSpace(x.DataPreview)))
+            AppendLog($"{row.Time} {row.Command} {row.Direction} Len={row.DataLength} Status={row.ScsiStatus} Bytes={row.BytesReturned} {row.DataPreview}");
+    }
+
     private void ShowError(string message, Exception exception)
     {
         AppendLog($"ERROR: {message} {exception}");
@@ -304,6 +477,24 @@ public partial class MainWindow : Window
         public IReadOnlyList<string> Warnings => IndexResult.Warnings;
     }
 
+    private sealed record DebugExportResult(
+        LtfsVolumeDiscoveryResult IndexResult,
+        IReadOnlyList<ScsiCommandTraceRow> CommandTraces,
+        string ArchivePath,
+        ArchiveValidationResult Validation)
+    {
+        public LtfsIndex Index => IndexResult.Index;
+        public LtfsIndexDiscoverySource Source => IndexResult.Source;
+        public IReadOnlyList<string> Warnings => IndexResult.Warnings;
+    }
+
+    private sealed record ArchiveValidationResult(
+        int EntryCount,
+        int SchemaCount,
+        int LabelCount,
+        int MamCount,
+        int CmCount);
+
     private sealed class DebugReadException(Exception innerException, IReadOnlyList<ScsiCommandTraceRow> commandTraces)
         : Exception(innerException.Message, innerException)
     {
@@ -320,7 +511,8 @@ public partial class MainWindow : Window
         string ScsiStatus,
         uint BytesReturned,
         string TransportError,
-        string Sense);
+        string Sense,
+        string DataPreview);
 
     private sealed class TraceScsiDrive(IScsiDrive inner) : IScsiDrive
     {
@@ -354,7 +546,7 @@ public partial class MainWindow : Window
         {
             var cdb = commandBlock.ToArray();
             var ok = inner.ScsiRead(commandBlock, returnBuffer, timeoutSeconds, out scsiStatus, out bytesReturned, senseBuffer);
-            AddTrace(cdb, DataDirection.In, returnBuffer.Length, ok, scsiStatus, bytesReturned, senseBuffer, inner.LastTransportError);
+            AddTrace(cdb, DataDirection.In, returnBuffer.Length, ok, scsiStatus, bytesReturned, senseBuffer, inner.LastTransportError, returnBuffer);
             return ok;
         }
 
@@ -368,7 +560,7 @@ public partial class MainWindow : Window
         {
             var cdb = commandBlock.ToArray();
             var ok = inner.ScsiWrite(commandBlock, dataBuffer, timeoutSeconds, out scsiStatus, out bytesReturned, senseBuffer);
-            AddTrace(cdb, DataDirection.Out, dataBuffer.Length, ok, scsiStatus, bytesReturned, senseBuffer, inner.LastTransportError);
+            AddTrace(cdb, DataDirection.Out, dataBuffer.Length, ok, scsiStatus, bytesReturned, senseBuffer, inner.LastTransportError, dataBuffer);
             return ok;
         }
 
@@ -382,7 +574,7 @@ public partial class MainWindow : Window
         {
             var cdb = commandBlock.ToArray();
             var ok = inner.ScsiCommand(commandBlock, dataDirection, timeout, out scsiStatus, out bytesReturned, senseBuffer);
-            AddTrace(cdb, dataDirection, 0, ok, scsiStatus, bytesReturned, senseBuffer, inner.LastTransportError);
+            AddTrace(cdb, dataDirection, 0, ok, scsiStatus, bytesReturned, senseBuffer, inner.LastTransportError, []);
             return ok;
         }
 
@@ -394,7 +586,8 @@ public partial class MainWindow : Window
             byte scsiStatus,
             uint bytesReturned,
             ReadOnlySpan<byte> senseBuffer,
-            ScsiTransportError? transportError)
+            ScsiTransportError? transportError,
+            ReadOnlySpan<byte> dataBuffer)
         {
             var row = new ScsiCommandTraceRow(
                 DateTime.Now.ToString("HH:mm:ss.fff"),
@@ -406,7 +599,8 @@ public partial class MainWindow : Window
                 $"0x{scsiStatus:X2}",
                 bytesReturned,
                 transportError is null ? "" : $"{transportError.ErrorCode}: {transportError.Message}",
-                FormatSense(senseBuffer));
+                FormatSense(senseBuffer),
+                FormatDataPreview(dataBuffer, bytesReturned, senseBuffer));
 
             lock (gate)
                 traces.Add(row);
@@ -461,6 +655,35 @@ public partial class MainWindow : Window
                 return "";
 
             return FormatBytes(sense);
+        }
+
+        private static string FormatDataPreview(ReadOnlySpan<byte> data, uint bytesReturned, ReadOnlySpan<byte> sense)
+        {
+            if (data.IsEmpty)
+                return "";
+
+            var actualLength = GetActualReadLength(data.Length, bytesReturned, sense);
+            if (actualLength <= 0)
+                return "";
+
+            var preview = data[..Math.Min(actualLength, 256)];
+            var ascii = new string(preview.ToArray().Select(x => x is >= 0x20 and <= 0x7E ? (char)x : '.').ToArray());
+            var hex = FormatBytes(preview);
+            var suffix = actualLength > preview.Length ? $" ... +{actualLength - preview.Length} bytes" : "";
+            return $"Actual={actualLength}; ASCII=\"{ascii}\"; HEX={hex}{suffix}";
+        }
+
+        private static int GetActualReadLength(int allocationLength, uint bytesReturned, ReadOnlySpan<byte> sense)
+        {
+            if (sense.Length >= 7 && (sense[2] & 0x20) != 0)
+            {
+                var residual = (sense[3] << 24) | (sense[4] << 16) | (sense[5] << 8) | sense[6];
+                if (residual >= 0 && residual <= allocationLength)
+                    return allocationLength - residual;
+            }
+
+            _ = bytesReturned;
+            return allocationLength;
         }
 
         private static string FormatBytes(ReadOnlySpan<byte> bytes)

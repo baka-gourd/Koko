@@ -33,7 +33,8 @@
                 <Button Content="Refresh SCSI Tape Drives" Click="RefreshDrives_Click" Height="32" />
                 <Button Content="Show TUR Packet HexDump" Click="ShowTurPacketHexDump_Click" Height="32" Margin="0,0,0,8" />
                 <TextBox x:Name="Manual" Margin="0,0,0,8" Height="28" />
-                <Button Content="Read Index Partition Schema" Click="ReadIndexPartitionSchema_Click" Height="32" />
+                <Button Content="Read Index Partition Schema" Click="ReadIndexPartitionSchema_Click" Height="32" Margin="0,0,0,8" />
+                <Button Content="Export LTFS tar.zst" Click="ExportLtfsTarZst_Click" Height="32" />
                 <TextBlock Margin="0,8,0,0" TextWrapping="Wrap" Foreground="DimGray" Text="Reads from the selected real LTO drive using Core LTFS device interfaces. This is non-destructive." />
 
                 <Separator Margin="0,16,0,12" />
@@ -80,6 +81,7 @@
                             <DataGridTextColumn Header="Bytes" Binding="{Binding BytesReturned}" Width="70" />
                             <DataGridTextColumn Header="Transport" Binding="{Binding TransportError}" Width="220" />
                             <DataGridTextColumn Header="Sense" Binding="{Binding Sense}" Width="260" />
+                            <DataGridTextColumn Header="Data" Binding="{Binding DataPreview}" Width="520" />
                         </DataGrid.Columns>
                     </DataGrid>
                 </DockPanel>
