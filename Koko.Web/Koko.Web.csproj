@@ -1,13 +1,86 @@
-<Project Sdk="Microsoft.NET.Sdk.Web">
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <TargetFramework>net11.0</TargetFramework>
+    <TargetFramework>net11.0-windows10.0.19041.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <FrontendRoot>$(MSBuildProjectDirectory)\koko-web\</FrontendRoot>
+    <FrontendBuildOutput>$(FrontendRoot)build\</FrontendBuildOutput>
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.8" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.8" />
+    <PackageReference Include="Serilog.Extensions.Hosting" Version="10.0.0" />
+    <PackageReference Include="Serilog.Extensions.Logging" Version="10.0.0" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="6.1.1" />
+    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.7" />
   </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Koko.Core\Koko.Core.csproj"/>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Remove="koko-web\**" />
+    <None Remove="koko-web\**" />
+    <Compile Remove="koko-web\**" />
+    <EmbeddedResource Remove="koko-web\**" />
+  </ItemGroup>
+
+  <Target Name="CheckFrontendDependencies">
+    <Error
+      Condition="!Exists('$(FrontendRoot)node_modules')"
+      Text="Frontend dependencies are missing. Run 'pnpm install' in $(FrontendRoot) before building Koko.Web." />
+  </Target>
+
+  <Target Name="BuildFrontend" DependsOnTargets="CheckFrontendDependencies">
+    <RemoveDir Directories="$(FrontendBuildOutput)" />
+    <Exec WorkingDirectory="$(FrontendRoot)" Command="pnpm build" />
+  </Target>
+
+  <Target Name="CopyFrontendToOutput"
+          DependsOnTargets="BuildFrontend"
+          AfterTargets="CopyFilesToOutputDirectory">
+    <ItemGroup>
+      <FrontendBuildFiles Include="$(FrontendBuildOutput)**\*" />
+    </ItemGroup>
+
+    <RemoveDir Directories="$(TargetDir)koko-web\" />
+    <RemoveDir Directories="$(TargetDir)ui\" />
+    <MakeDir Directories="$(TargetDir)ui\" />
+
+    <Copy
+      SourceFiles="@(FrontendBuildFiles)"
+      DestinationFiles="@(FrontendBuildFiles->'$(TargetDir)ui\%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="false" />
+  </Target>
+
+  <Target Name="CopyFrontendToPublish"
+          DependsOnTargets="BuildFrontend"
+          AfterTargets="Publish"
+          Condition="Exists('$(FrontendBuildOutput)')">
+    <ItemGroup>
+      <FrontendPublishFiles Include="$(FrontendBuildOutput)**\*" />
+    </ItemGroup>
+
+    <RemoveDir Directories="$(PublishDir)koko-web\" />
+    <RemoveDir Directories="$(PublishDir)ui\" />
+    <MakeDir Directories="$(PublishDir)ui\" />
+
+    <Copy
+      SourceFiles="@(FrontendPublishFiles)"
+      DestinationFiles="@(FrontendPublishFiles->'$(PublishDir)ui\%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="false" />
+  </Target>
+
+  <Target Name="CleanFrontendOutput" AfterTargets="Clean">
+    <RemoveDir Directories="$(TargetDir)koko-web\" />
+    <RemoveDir Directories="$(TargetDir)ui\" />
+  </Target>
 
 </Project>

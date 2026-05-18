@@ -1,3 +1,9 @@
+allowBuilds:
+  '@carbon/charts': true
+  '@carbon/charts-svelte': set this to true or false
+  '@carbon/colors': true
+  '@carbon/utils-position': true
+  carbon-components-svelte: true
 onlyBuiltDependencies:
   - '@tailwindcss/oxide'
   - carbon-components-svelte
