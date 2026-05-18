@@ -8,6 +8,7 @@ using Blake3;
 using Koko.Core.Events;
 using Koko.Core.Scsi;
 using Koko.Core.Scsi.Commands;
+using Koko.Core.Scsi.Parsers;
 
 using Serilog;
 
@@ -4494,6 +4495,172 @@ public sealed class ScsiLtfsWriterDevice : ILtfsWriterDevice, ILtfsEncryptionCap
             out var result,
             out var data), result, "READ ATTRIBUTE failed.");
         return ValueTask.FromResult<IReadOnlyList<MamAttribute>>(ParseMamAttributes(data));
+    }
+
+    public async ValueTask<byte[]?> ReadCartridgeMemoryAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await FlushBeforeMetadataReadAsync(cancellationToken).ConfigureAwait(false);
+
+        return TryReadCartridgeMemoryBuffer(bufferId: 0x10, cancellationToken)
+            ?? TryReadCartridgeMemoryBuffer(bufferId: 0x05, cancellationToken)
+            ?? TryReadCartridgeMemoryDiagnostic(cancellationToken);
+    }
+
+    private async ValueTask FlushBeforeMetadataReadAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (LtfsScsiCommandException ex) when (IsIgnorableMetadataFlushWriteProtect(ex, cancellationToken))
+        {
+            // LTFSCopyGUI also flushes before READ BUFFER, but its flush returns sense.
+            // For read-only metadata export, a write-protect failure on WRITE FILEMARKS(0) is not fatal.
+        }
+    }
+
+    private bool IsIgnorableMetadataFlushWriteProtect(LtfsScsiCommandException exception, CancellationToken cancellationToken)
+    {
+        if (!exception.WriteProtected)
+            return false;
+
+        if (exception.AdditionalSenseCode == 0x27)
+            return true;
+
+        return TryReadDtdStatusWriteProtected(cancellationToken) == true;
+    }
+
+    private bool? TryReadDtdStatusWriteProtected(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            if (!LogSenseCommand.TryExecute(
+                    drive,
+                    new LogSenseCommand(LogPageCode.DtdStatus),
+                    out var result,
+                    out var response)
+                || !result.IsGood)
+            {
+                return null;
+            }
+
+            foreach (var parameter in response.Parameters)
+            {
+                if (parameter.ParameterCode is not (0x0000 or 0x8000) || parameter.Value.Length == 0)
+                    continue;
+
+                return (parameter.Value.Span[0] & 0x10) != 0;
+            }
+
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private byte[]? TryReadCartridgeMemoryBuffer(byte bufferId, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!ReadBufferCommand.TryExecuteWithLengthProbe(
+                drive,
+                new ReadBufferCommand(Mode: 0x02, BufferId: bufferId),
+                out var result,
+                out var data)
+            || !result.IsGood)
+        {
+            return null;
+        }
+
+        return TryNormalizeCartridgeMemory(data);
+    }
+
+    private byte[]? TryReadCartridgeMemoryDiagnostic(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ReadOnlyMemory<byte> parameterData = new byte[]
+        {
+            0xB0, 0x00, 0x00, 0x10,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x1F, 0xE0,
+            0x00, 0x00, 0x00, 0x15,
+            0x00, 0x00, 0x00, 0x08
+        };
+
+        if (!SendDiagnosticCommand.TryExecute(
+                drive,
+                new SendDiagnosticCommand(SelfTest: false, UnitOffline: true, ParameterData: parameterData),
+                out var sendResult)
+            || !sendResult.IsGood)
+        {
+            return null;
+        }
+
+        if (!ReceiveDiagnosticResultsCommand.TryExecute(
+                drive,
+                new ReceiveDiagnosticResultsCommand(PageCode: 0xB0, PageCodeValid: true, AllocationLength: 0xC7A2),
+                out var receiveResult,
+                out var data)
+            || !receiveResult.IsGood
+            || data.Length <= 6)
+        {
+            return null;
+        }
+
+        return TryNormalizeCartridgeMemory(ParseDiagnosticCartridgeMemory(data.AsSpan(6)));
+    }
+
+    private static byte[] ParseDiagnosticCartridgeMemory(ReadOnlySpan<byte> diagnosticPayload)
+    {
+        var bytes = new List<byte>(diagnosticPayload.Length / 3);
+        var highNibble = -1;
+        foreach (var value in diagnosticPayload)
+        {
+            var nibble = FromHex((char)value);
+            if (nibble < 0)
+                continue;
+
+            if (highNibble < 0)
+            {
+                highNibble = nibble;
+                continue;
+            }
+
+            bytes.Add((byte)((highNibble << 4) | nibble));
+            highNibble = -1;
+        }
+
+        return bytes.ToArray();
+    }
+
+    private static int FromHex(char value)
+    {
+        if (value is >= '0' and <= '9')
+            return value - '0';
+        if (value is >= 'a' and <= 'f')
+            return value - 'a' + 10;
+        if (value is >= 'A' and <= 'F')
+            return value - 'A' + 10;
+        return -1;
+    }
+
+    private static byte[]? TryNormalizeCartridgeMemory(ReadOnlySpan<byte> data)
+    {
+        if (data.IsEmpty)
+            return null;
+
+        try
+        {
+            var parser = CMParser.CreateFromSpan(data);
+            return parser.RawData.ToArray();
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static bool IsFilemark(ScsiCommandResult result)

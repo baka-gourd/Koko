@@ -8,6 +8,12 @@ using Serilog;
 
 namespace Koko.Core.Scsi.Parsers;
 
+public sealed record CmCapacitySummary(
+    long? TotalBytes,
+    long? UsedBytes,
+    long? AvailableBytes,
+    long? EstimatedCapacityLossBytes);
+
 public sealed class CMParser
 {
     private const uint GuardWrapIdentifier = 0xFFFFFFFE;
@@ -23,6 +29,8 @@ public sealed class CMParser
     private ushort _cartridgeType;
 
     #region PUBLIC_PARSE_RESULTS
+
+    public ReadOnlyMemory<byte> RawData => _cm;
 
     public List<Page> PageData { get; } = new();
     public TapeCartridgeProfile? TapeCartridgeProfile { get; private set; }
@@ -1875,6 +1883,76 @@ public sealed class CMParser
 
     private Usage? GetUsage()
         => UsageData.Count > 0 ? UsageData[0] : null;
+
+    public CmCapacitySummary GetCapacitySummary()
+    {
+        if (TapeCartridgeProfile is null
+            || TapeCartridgeProfile.Id.Family == CartridgeFamily.Cleaning
+            || TapeDirectoryData.CapacityLoss.Count == 0
+            || _nWraps <= 0
+            || _setsPerWrap <= 0
+            || TapeCartridgeProfile.KbPerDataset <= 0)
+        {
+            return new CmCapacitySummary(null, null, null, null);
+        }
+
+        var partitionWraps = GetDataPartitionWrapCounts();
+        if (partitionWraps.Count == 0)
+            return new CmCapacitySummary(null, null, null, null);
+
+        var bytesPerDataset = checked((long)TapeCartridgeProfile.KbPerDataset * 1000L);
+        long usedDatasets = 0;
+        long lostDatasets = 0;
+
+        var wrapsToRead = Math.Min(_nWraps, TapeDirectoryData.CapacityLoss.Count);
+        for (var wi = 0; wi < wrapsToRead; wi++)
+        {
+            var loss = GetCapacityLoss(wi);
+            var datasetEntry = TapeDirectoryData.GetDatasetsOnWrap(wi, createNew: false);
+            if (datasetEntry is null)
+                continue;
+
+            if (loss is >= 0 or -2)
+                usedDatasets += Math.Max(0, datasetEntry.Data);
+
+            if (loss >= 0)
+                lostDatasets += Math.Max(0, _setsPerWrap - datasetEntry.Data);
+        }
+
+        var totalDatasets = checked((long)partitionWraps.Sum() * _setsPerWrap);
+        var totalBytes = checked(totalDatasets * bytesPerDataset);
+        var usedBytes = checked(usedDatasets * bytesPerDataset);
+        var lossBytes = checked(lostDatasets * bytesPerDataset);
+        var availableBytes = Math.Max(0, totalBytes - usedBytes - lossBytes);
+
+        return new CmCapacitySummary(totalBytes, usedBytes, availableBytes, lossBytes);
+    }
+
+    private List<int> GetDataPartitionWrapCounts()
+    {
+        var dataWrapList = new List<int>();
+        var dataWrapNum = 0;
+        foreach (var loss in TapeDirectoryData.CapacityLoss)
+        {
+            if (loss is -3)
+            {
+                if (dataWrapNum > 0)
+                {
+                    dataWrapList.Add(dataWrapNum);
+                    dataWrapNum = 0;
+                }
+            }
+            else
+            {
+                dataWrapNum += 1;
+            }
+        }
+
+        if (dataWrapNum > 0)
+            dataWrapList.Add(dataWrapNum);
+
+        return dataWrapList;
+    }
 
     private string? BuildApplicationInfo()
     {

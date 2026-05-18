@@ -496,7 +496,8 @@ public sealed class LtfsFormatService
                     label.Clone(),
                     autosave,
                     Sources: null,
-                    device as ILtfsMetadataExportDevice),
+                    device as ILtfsMetadataExportDevice,
+                    Barcode: request.Barcode),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

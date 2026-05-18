@@ -14,6 +14,7 @@ public sealed class CMParserTests
         await Assert.That(parser.PageData.Count).IsGreaterThan(0);
         await Assert.That(parser.GetModernReport().Length).IsGreaterThan(0);
         await Assert.That(parser.GetLegacyReport().Length).IsGreaterThan(0);
+        await Assert.That(parser.GetCapacitySummary()).IsNotNull();
     }
 
     [Test]

@@ -167,6 +167,7 @@ public sealed record LtfsEncryptionEvent(
 public sealed record LtfsAutosaveOptions(
     bool Enabled = false,
     string? RootDirectory = null,
+    string? OutputArchivePath = null,
     int RetainLastPerVolume = 5,
     bool ExportSchema = true,
     bool ExportLabel = true,
@@ -210,7 +211,8 @@ public sealed record LtfsAutosaveRequest(
     LtfsAutosaveOptions Options,
     IReadOnlyList<LtfsWriteSource>? Sources = null,
     ILtfsMetadataExportDevice? MetadataDevice = null,
-    LtfsRemainingManifest? RemainingManifest = null);
+    LtfsRemainingManifest? RemainingManifest = null,
+    string? Barcode = null);
 
 public sealed class LtfsAutosaveExporter
 {
@@ -232,18 +234,27 @@ public sealed class LtfsAutosaveExporter
         var options = request.Options;
         if (!options.Enabled)
             return Array.Empty<string>();
-        if (string.IsNullOrWhiteSpace(options.RootDirectory))
-            throw new ArgumentException("Autosave root directory is required when autosave is enabled.", nameof(request));
 
         var safeVolume = SafeName(request.Label?.VolumeUuid.ToString("D") ?? request.Index.VolumeUuid.ToString("D"));
-        var directory = Path.Combine(options.RootDirectory, safeVolume);
+        var safeBarcode = string.IsNullOrWhiteSpace(request.Barcode) ? safeVolume : SafeName(request.Barcode);
+        var explicitArchivePath = string.IsNullOrWhiteSpace(options.OutputArchivePath)
+            ? null
+            : Path.GetFullPath(options.OutputArchivePath);
+        if (explicitArchivePath is null && string.IsNullOrWhiteSpace(options.RootDirectory))
+            throw new ArgumentException("Autosave root directory or output archive path is required when autosave is enabled.", nameof(request));
+
+        var directory = explicitArchivePath is null
+            ? Path.Combine(options.RootDirectory!, safeBarcode)
+            : Path.GetDirectoryName(explicitArchivePath) ?? Directory.GetCurrentDirectory();
         Directory.CreateDirectory(directory);
 
         var generation = request.Index.GenerationNumber;
         var location = request.Index.Location;
         var timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd_HHmmss.fffffff'Z'");
-        var stem = $"LTFSIndex_Autosave_{safeVolume}_GEN{generation}_P{FormatPartition(location.Partition)}_B{location.StartBlock}_{timestamp}";
-        var archivePath = Path.Combine(directory, stem + ".tar.zst");
+        var stem = explicitArchivePath is null
+            ? $"LTFSIndex_Autosave_{safeVolume}_GEN{generation}_P{FormatPartition(location.Partition)}_B{location.StartBlock}_{timestamp}"
+            : GetTarZstandardStem(explicitArchivePath);
+        var archivePath = explicitArchivePath ?? Path.Combine(directory, stem + ".tar.zst");
         var partialArchivePath = archivePath + ".partial";
         var stagingDirectory = Path.Combine(Path.GetTempPath(), "KokoLtfsAutosave", Guid.NewGuid().ToString("N"));
         var entries = new List<AutosaveArchiveEntry>();
@@ -341,6 +352,10 @@ public sealed class LtfsAutosaveExporter
                 var cm = await request.MetadataDevice.ReadCartridgeMemoryAsync(cancellationToken).ConfigureAwait(false);
                 if (cm is { Length: > 0 })
                 {
+                    var binPath = Path.Combine(stagingDirectory, stem + ".cm.bin");
+                    await WriteBytesTempAsync(binPath, cm, cancellationToken).ConfigureAwait(false);
+                    entries.Add(new AutosaveArchiveEntry(binPath, Path.GetFileName(binPath)));
+
                     var path = Path.Combine(stagingDirectory, stem + ".cm.txt");
                     await WriteTextTempAsync(path, Convert.ToHexString(cm), cancellationToken).ConfigureAwait(false);
                     entries.Add(new AutosaveArchiveEntry(path, Path.GetFileName(path)));
@@ -349,7 +364,8 @@ public sealed class LtfsAutosaveExporter
 
             await WriteTarZstandardArchiveAtomicAsync(partialArchivePath, archivePath, entries, cancellationToken).ConfigureAwait(false);
             artifacts.Add(archivePath);
-            PruneOldExports(directory, safeVolume, options.RetainLastPerVolume);
+            if (explicitArchivePath is null)
+                PruneOldExports(directory, safeVolume, options.RetainLastPerVolume);
             eventBus.Publish(new LtfsAutosaveExportEvent(request.OperationId, request.Reason, directory, artifacts, Success: true));
             return artifacts;
         }
@@ -379,6 +395,14 @@ public sealed class LtfsAutosaveExporter
         {
             await using var writer = new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true);
             await writer.WriteAsync(text.AsMemory(), cancellationToken).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async ValueTask WriteBytesTempAsync(string path, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+    {
+        await WriteTempAsync(path, async stream =>
+        {
+            await stream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -436,6 +460,14 @@ public sealed class LtfsAutosaveExporter
     }
 
     private static string FormatPartition(LtfsPartition partition) => partition == LtfsPartition.A ? "a" : "b";
+
+    private static string GetTarZstandardStem(string archivePath)
+    {
+        var fileName = Path.GetFileName(archivePath);
+        return fileName.EndsWith(".tar.zst", StringComparison.OrdinalIgnoreCase)
+            ? fileName[..^".tar.zst".Length]
+            : Path.GetFileNameWithoutExtension(fileName);
+    }
 
     private sealed record AutosaveArchiveEntry(string Path, string EntryName);
 }

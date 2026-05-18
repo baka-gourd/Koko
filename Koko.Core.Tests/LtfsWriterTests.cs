@@ -269,7 +269,11 @@ public sealed class LtfsWriterTests
         var temp = Path.Combine(Path.GetTempPath(), "KokoLtfsAutosaveTests", Guid.NewGuid().ToString("N"));
         try
         {
-            var device = new RecordingWriterDevice { Position = new LtfsTapePosition(LtfsPartition.B, 10) };
+            var device = new RecordingWriterDevice
+            {
+                Position = new LtfsTapePosition(LtfsPartition.B, 10),
+                CartridgeMemory = Encoding.ASCII.GetBytes("cm-dump"),
+            };
             var data = Encoding.ASCII.GetBytes("autosave");
             var label = new LtfsLabel { VolumeUuid = Guid.Parse("11111111-1111-1111-1111-111111111111"), BlockSize = 8 };
 
@@ -305,6 +309,7 @@ public sealed class LtfsWriterTests
             await Assert.That(entryNames.Count(x => x.EndsWith(".label", StringComparison.Ordinal))).IsEqualTo(1);
             await Assert.That(entryNames.Count(x => x.EndsWith(".session.json", StringComparison.Ordinal))).IsEqualTo(1);
             await Assert.That(entryNames.Count(x => x.EndsWith(".manifest.json", StringComparison.Ordinal))).IsEqualTo(1);
+            await Assert.That(entryNames.Count(x => x.EndsWith(".cm.bin", StringComparison.Ordinal))).IsEqualTo(1);
         }
         finally
         {
@@ -1583,6 +1588,7 @@ public sealed class LtfsWriterTests
         public int WriteCount { get; set; }
         public LogSenseResponse LogSenseResponse { get; set; } = LogSenseResponse.FromRaw(Array.Empty<byte>());
         public IReadOnlyList<MamAttribute> MamAttributes { get; set; } = Array.Empty<MamAttribute>();
+        public byte[]? CartridgeMemory { get; init; }
 
         public ValueTask ReserveAsync(CancellationToken cancellationToken = default)
         {
@@ -1759,7 +1765,7 @@ public sealed class LtfsWriterTests
 
         public ValueTask<byte[]?> ReadCartridgeMemoryAsync(CancellationToken cancellationToken = default)
         {
-            return ValueTask.FromResult<byte[]?>(null);
+            return ValueTask.FromResult(CartridgeMemory);
         }
 
         private static string Classify(byte[] data)

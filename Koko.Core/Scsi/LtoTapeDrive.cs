@@ -178,6 +178,8 @@ public sealed class LtoTapeDrive(SafeFileHandle handle) : DriveBase, ILtfsWriter
 
     public ValueTask<IReadOnlyList<MamAttribute>> ReadMamAttributesAsync(LtfsPartition partition, CancellationToken cancellationToken = default) => WriterDevice.ReadMamAttributesAsync(partition, cancellationToken);
 
+    public ValueTask<byte[]?> ReadCartridgeMemoryAsync(CancellationToken cancellationToken = default) => WriterDevice.ReadCartridgeMemoryAsync(cancellationToken);
+
     public ValueTask<LtfsPartitionModeSense> ReadPartitionModeSenseAsync(CancellationToken cancellationToken = default) => FormatDevice.ReadPartitionModeSenseAsync(cancellationToken);
 
     public bool GetInquiry(uint timeoutSeconds = 600)
